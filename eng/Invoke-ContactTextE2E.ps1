@@ -145,12 +145,15 @@ try {
     Require ($alice.address -cne $bob.address) 'Profiles share identity.'
     # A deterministic caller logical intent permits exact scenario restart;
     # protocol nonces/keys/grants are exclusively authored by their real owners.
+    $resumeAccepted = $false
     if ($ResumeContact) {
         $existingAlice = Invoke-Client 'alice-retained-contact' $AliceProfile @('contact','list')
         $existingBob = Invoke-Client 'bob-retained-contact' $BobProfile @('contact','list')
         Require (@($existingAlice.contacts).Count -eq 1 -and @($existingBob.contacts).Count -eq 1) 'Resume requires two unique retained contacts.'
         Require ($existingAlice.contacts[0].conversation -ceq $existingBob.contacts[0].conversation -and
             $existingAlice.contacts[0].initiator -and -not $existingBob.contacts[0].initiator) 'Retained contacts do not form one exact pair.'
+        $resumeAccepted = $existingAlice.contacts[0].state -ceq 'PeerAcceptanceRetained' -and
+            $existingBob.contacts[0].state -ceq 'LocalAcceptanceRetained'
     } else {
         [void](Invoke-Client 'contact-request' $AliceProfile (@('contact','request','--address',$bob.address,'--operation',(Operation ('request/'+$bob.address)))+$networkArgs))
         [void](Invoke-Client 'bob-receive-request' $BobProfile (@('mailbox','sync')+$networkArgs))
@@ -158,8 +161,13 @@ try {
     $bc = Invoke-Client 'bob-contact' $BobProfile @('contact','list')
     Require (@($bc.contacts).Count -eq 1) 'Bob has no unique received contact.'
     $bConversation = $bc.contacts[0].conversation
-    [void](Invoke-Client 'contact-accept' $BobProfile (@('contact','accept','--conversation',$bConversation,'--operation',(Operation ('accept/'+$bConversation)))+$networkArgs))
-    [void](Invoke-Client 'alice-receive-accept' $AliceProfile (@('mailbox','sync')+$networkArgs))
+    # Continuation scheduling only. QueueText/RetryText still independently
+    # verify actual native and protected acceptance through Shared's owner.
+    # Do not resend an already confirmed control event just to reach text.
+    if (-not $resumeAccepted) {
+        [void](Invoke-Client 'contact-accept' $BobProfile (@('contact','accept','--conversation',$bConversation,'--operation',(Operation ('accept/'+$bConversation)))+$networkArgs))
+        [void](Invoke-Client 'alice-receive-accept' $AliceProfile (@('mailbox','sync')+$networkArgs))
+    }
     $ac = Invoke-Client 'alice-contact' $AliceProfile @('contact','list')
     Require (@($ac.contacts).Count -eq 1 -and $ac.contacts[0].state -ceq 'PeerAcceptanceRetained') 'Alice lacks explicit retained peer acceptance.'
     $aConversation = $ac.contacts[0].conversation

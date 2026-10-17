@@ -86,9 +86,11 @@ setup; it supplies no authority and all business/currentness checks still run.
 `-IntentRevision` is an explicit separate QA command, not automatic retry: never
 advance it to overwrite or silently evade an unresolved original intent.
 `-ResumeContact` continues two already materialized, unique contacts only if
-their exact conversation IDs and opposite initiator roles match. It still sends
-the same owned acceptance operation and requires actual peer acceptance before
-text. Its receipt is explicitly a **retained-contact continuation**, not evidence
+their exact conversation IDs and opposite initiator roles match. If both sides
+already retain acceptance, it skips redundant control dispatch; otherwise it
+sends the same owned acceptance operation and receives it. Text commands still
+verify actual native/protected consent in Shared, not this scheduling hint.
+Its receipt is explicitly a **retained-contact continuation**, not evidence
 of a new Initial publication/store in that run; qualify the earlier receive
 separately and use the full scenario for final fresh-cycle acceptance.
 `-RetryExactTransient` tests one bounded cold-process retry of an identical
