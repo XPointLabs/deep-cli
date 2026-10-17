@@ -5,6 +5,7 @@ param(
     [Parameter(Mandatory)][string]$RunDirectory,
     [switch]$ReusePublishedAccounts,
     [switch]$ResumeContact,
+    [switch]$RetryExactTransient,
     [ValidateRange(0,100)][int]$IntentRevision = 0,
     [ValidatePattern('^[a-z][a-z0-9-]{0,31}$')][string]$AliceProfile = 'cli-e2e-alice',
     [ValidatePattern('^[a-z][a-z0-9-]{0,31}$')][string]$BobProfile = 'cli-e2e-bob'
@@ -50,7 +51,7 @@ $steps = [Collections.Generic.List[object]]::new()
 $started = [DateTime]::UtcNow
 $networkArgs = @('--bootstrap', $BootstrapDirectory, '--registry', $RegistryOrigin)
 
-function Invoke-Client([string]$Phase, [string]$ClientProfile, [string[]]$Command) {
+function Invoke-Client([string]$Phase, [string]$ClientProfile, [string[]]$Command, [int]$Attempt = 1) {
     if ((Get-RuntimeInputFingerprint) -cne $runtimeFingerprint) { throw 'CLI runtime inputs changed during scenario.' }
     $start = [Diagnostics.ProcessStartInfo]::new($exe)
     $start.UseShellExecute = $false; $start.CreateNoWindow = $true
@@ -86,8 +87,19 @@ function Invoke-Client([string]$Phase, [string]$ClientProfile, [string[]]$Comman
             $failure = $parsed
             if ($failure.code -eq 'business-operation-failed') {
                 [pscustomobject]@{phase=$Phase;diagnostic=$failure.diagnostic} |
-                    ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $run 'failure.json') -Encoding utf8
+                    ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $run ('failure-'+$steps.Count+'.json')) -Encoding utf8
                 Write-Host ($failure.diagnostic | ConvertTo-Json -Depth 8 -Compress)
+                # Scenario scheduling only, not authority or proof of noncommit.
+                # At most ONE new process repeats the IDENTICAL owned command.
+                # Never repeat account creation or non-idempotent text queueing.
+                $eligible = $Phase -in @('contact-request','contact-accept','bob-receive-request',
+                    'alice-receive-accept','alice-text-send','bob-text-send','bob-receive-text','alice-receive-text','dedup-poll')
+                $transient = @($failure.diagnostic.causes | Where-Object {
+                    $_.category -in @('OutcomeUnknown','Cancelled','IngressRetryableBeforeForward') -or $_.check -ceq 'ClaimOutcomeUnknown'
+                }).Count -gt 0
+                if ($RetryExactTransient -and $Attempt -eq 1 -and $eligible -and $transient) {
+                    return Invoke-Client ($Phase+'-exact-retry') $ClientProfile $Command 2
+                }
             }
             throw 'CLI operation failed; exact account and pending operations retained.'
         }
@@ -167,7 +179,7 @@ try {
     }
     $passed = $true
 } finally {
-    [ordered]@{scope=$(if($ResumeContact){'cli-retained-contact-bidirectional-text'}else{'cli-real-contact-bidirectional-text'});passed=$passed;reusedPublishedAccounts=[bool]$ReusePublishedAccounts;resumedContact=[bool]$ResumeContact;intentRevision=$IntentRevision;startedUtc=$started.ToString('o');finishedUtc=[DateTime]::UtcNow.ToString('o');
+    [ordered]@{scope=$(if($ResumeContact){'cli-retained-contact-bidirectional-text'}else{'cli-real-contact-bidirectional-text'});passed=$passed;reusedPublishedAccounts=[bool]$ReusePublishedAccounts;resumedContact=[bool]$ResumeContact;maximumExactAttempts=$(if($RetryExactTransient){2}else{1});intentRevision=$IntentRevision;startedUtc=$started.ToString('o');finishedUtc=[DateTime]::UtcNow.ToString('o');
         executableSha256=$exeHash.ToLowerInvariant();runtimeInputSha256=$runtimeFingerprint;deviceAcceptance=$false;steps=$steps.ToArray()} |
         ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $run 'receipt.json') -Encoding utf8
 }

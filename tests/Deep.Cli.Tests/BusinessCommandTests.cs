@@ -77,4 +77,19 @@ public sealed class BusinessCommandTests
         Assert.DoesNotContain("DO-NOT-EXPORT", json);
         Assert.DoesNotContain("BeforeForward", json);
     }
+
+    [Theory]
+    [InlineData(true, "IngressRetryableBeforeForward")]
+    [InlineData(false, "IngressRejectedBeforeForward")]
+    public void BeforeForwardClassificationUsesTheTypedTransportOutcome(bool retryable, string category)
+    {
+        var type = typeof(Deep.Client.Shared.Services.DeepIdV2AccountService).Assembly.GetType(
+            "Deep.Client.Shared.Services.PrivacyIngressRejectedBeforeForwardException", throwOnError: true)!;
+        Assert.True(type.IsSealed);
+        var error = (Exception)Activator.CreateInstance(type, System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.NonPublic, binder: null, args: [retryable, "DO-NOT-EXPORT", null], culture: null)!;
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(new CliBusinessException("ContactRequest", error).ClosedDiagnostic()));
+        Assert.Equal(category, json.RootElement.GetProperty("causes")[0].GetProperty("category").GetString());
+        Assert.DoesNotContain("DO-NOT-EXPORT", json.RootElement.GetRawText());
+    }
 }

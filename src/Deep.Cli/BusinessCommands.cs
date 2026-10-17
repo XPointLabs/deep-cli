@@ -107,6 +107,13 @@ internal sealed class CliBusinessException(string phase, Exception error) : Exce
             var check = "Unclassified";
             var exceptionType = current.GetType();
             if (exceptionType.Assembly == typeof(DeepIdV2AccountService).Assembly && exceptionType.IsSealed &&
+                exceptionType.FullName == "Deep.Client.Shared.Services.PrivacyIngressRejectedBeforeForwardException")
+                // This exact sealed owned type has a bool auto-property. Never
+                // invoke a caller/third-party exception getter or print its text.
+                category = exceptionType.GetProperty("Retryable", System.Reflection.BindingFlags.Instance |
+                    System.Reflection.BindingFlags.NonPublic)?.GetValue(current) is true
+                    ? "IngressRetryableBeforeForward" : "IngressRejectedBeforeForward";
+            if (exceptionType.Assembly == typeof(DeepIdV2AccountService).Assembly && exceptionType.IsSealed &&
                 exceptionType.FullName == "Deep.Client.Shared.Services.ContactV2.DeepIdV2PreKeyClaimUnavailableException")
                 check = current.Message switch
                 {

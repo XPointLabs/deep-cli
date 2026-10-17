@@ -91,6 +91,11 @@ the same owned acceptance operation and requires actual peer acceptance before
 text. Its receipt is explicitly a **retained-contact continuation**, not evidence
 of a new Initial publication/store in that run; qualify the earlier receive
 separately and use the full scenario for final fresh-cycle acceptance.
+`-RetryExactTransient` tests one bounded cold-process retry of an identical
+idempotent business command after an uncertain/cancelled or retryable-before-
+forward result. It never repeats account creation/text queueing, changes an
+operation ID, or extends authority. Both attempts and every failure diagnostic
+remain in the receipt; all delivery/history checks must still pass.
 
 ## Next, in order
 
