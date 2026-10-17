@@ -81,6 +81,7 @@ The driver fingerprints the complete bounded runtime output tree before/after
 commands, including managed assemblies, native providers and configuration.
 An apphost EXE hash alone does not identify .NET application code. The receipt
 contains the combined digest, not runtime paths or profile state.
+The driver also pins its own source SHA256 before/after every command.
 `-ReusePublishedAccounts` resumes already initialized profiles without repeating
 setup; it supplies no authority and all business/currentness checks still run.
 `-IntentRevision` is an explicit separate QA command, not automatic retry: never
@@ -104,6 +105,15 @@ idempotent business command after an uncertain/cancelled or retryable-before-
 forward result. It never repeats account creation/text queueing, changes an
 operation ID, or extends authority. Both attempts and every failure diagnostic
 remain in the receipt; all delivery/history checks must still pass.
+
+`-TextRevision 1` (then2, etc.) explicitly sends a new synthetic regression pair
+after a successful original cycle, for example after a node upgrade. It requires
+both resume switches, retained consent, no prior/unrelated pending text and both prior texts
+exactly once in each cold history. Never advance it to evade an unknown Store;
+retry the same revision to retain its existing queue/operation. The receipt
+records the numeric revision; this changes only QA content, not protocol bytes.
+`pwsh -NoProfile -File eng/Test-ContactTextScenario.ps1` checks syntax and rejects
+unsafe revision scheduling before any file creation, CLI process or network.
 
 Closed failure diagnostics distinguish the known ingress control classes
 MalformedFrame/WrongOrigin/Saturated/Unavailable from arbitrary exception text.

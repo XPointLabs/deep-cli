@@ -7,12 +7,18 @@ param(
     [switch]$ResumeContact,
     [switch]$RetryExactTransient,
     [switch]$ObserveUnknownStore,
+    [ValidateRange(0,100)][int]$TextRevision = 0,
     [ValidateRange(0,100)][int]$IntentRevision = 0,
     [ValidatePattern('^[a-z][a-z0-9-]{0,31}$')][string]$AliceProfile = 'cli-e2e-alice',
     [ValidatePattern('^[a-z][a-z0-9-]{0,31}$')][string]$BobProfile = 'cli-e2e-bob'
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ($TextRevision -gt 0 -and (-not $ResumeContact -or -not $ReusePublishedAccounts)) {
+    throw 'New regression texts require the already accepted retained pair.'
+}
+$scenarioPath = $PSCommandPath
+$scenarioHash = (Get-FileHash -LiteralPath $scenarioPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $repo = Split-Path $PSScriptRoot -Parent
 $exe = Join-Path $repo 'src/Deep.Cli/bin/Release/net10.0-windows/deep.exe'
 $run = [IO.Path]::GetFullPath($RunDirectory)
@@ -54,6 +60,7 @@ $started = [DateTime]::UtcNow
 $networkArgs = @('--bootstrap', $BootstrapDirectory, '--registry', $RegistryOrigin)
 
 function Invoke-Client([string]$Phase, [string]$ClientProfile, [string[]]$Command, [int]$Attempt = 1, [bool]$AllowUnknownStore = $false) {
+    if ((Get-FileHash -LiteralPath $scenarioPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $scenarioHash) { throw 'Scenario source changed during run.' }
     if ((Get-RuntimeInputFingerprint) -cne $runtimeFingerprint) { throw 'CLI runtime inputs changed during scenario.' }
     $start = [Diagnostics.ProcessStartInfo]::new($exe)
     $start.UseShellExecute = $false; $start.CreateNoWindow = $true
@@ -70,6 +77,7 @@ function Invoke-Client([string]$Phase, [string]$ClientProfile, [string[]]$Comman
             throw 'CLI process deadline; retained work must not be reminted.'
         }
         $out = $stdout.GetAwaiter().GetResult(); $err = $stderr.GetAwaiter().GetResult()
+        if ((Get-FileHash -LiteralPath $scenarioPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $scenarioHash) { throw 'Scenario source changed during command.' }
         if ((Get-RuntimeInputFingerprint) -cne $runtimeFingerprint) { throw 'CLI runtime inputs changed during command.' }
         if ($out.Length + $err.Length -gt 1048576) { throw 'CLI output exceeded bound.' }
         $parsed = if ($process.ExitCode -eq 0) { $out | ConvertFrom-Json } else { $err | ConvertFrom-Json }
@@ -180,6 +188,26 @@ try {
     $aConversation = $ac.contacts[0].conversation
     $textA = 'CLI E2E Alice to Bob 20261017'
     $textB = 'CLI E2E Bob to Alice 20261017'
+    if ($TextRevision -gt 0) {
+        Require $resumeAccepted 'Regression text requires retained acceptance on both sides.'
+        foreach ($pair in @(@($AliceProfile,$aConversation),@($BobProfile,$bConversation))) {
+            $pending = Invoke-Client 'prior-text-pending' $pair[0] @('message','pending')
+            $currentOwn = $(if ($pair[0] -ceq $AliceProfile) { $textA } else { $textB }) + ' / QA revision ' + $TextRevision
+            Require (@($pending.items).Count -le 1 -and @($pending.items | Where-Object {
+                $_.conversation -cne $pair[1] -or $_.text -cne $currentOwn
+            }).Count -eq 0) 'Unresolved prior or unrelated text blocks new regression messages.'
+            $history = Invoke-Client 'prior-text-history' $pair[0] @('message','list','--conversation',$pair[1])
+            for ($revision = 0; $revision -lt $TextRevision; $revision++) {
+                $suffix = if ($revision -eq 0) { '' } else { ' / QA revision ' + $revision }
+                $own = $(if ($pair[0] -ceq $AliceProfile) { $textA } else { $textB }) + $suffix
+                $peer = $(if ($pair[0] -ceq $AliceProfile) { $textB } else { $textA }) + $suffix
+                Require (@($history.items | Where-Object { $_.local -and $_.text -ceq $own }).Count -eq 1) 'Prior own regression text must exist exactly once.'
+                Require (@($history.items | Where-Object { -not $_.local -and $_.text -ceq $peer }).Count -eq 1) 'Prior peer regression text must exist exactly once.'
+            }
+        }
+        $textA += ' / QA revision ' + $TextRevision
+        $textB += ' / QA revision ' + $TextRevision
+    }
     Send-Text $AliceProfile $aConversation $textA 'alice-text'
     [void](Invoke-Client 'bob-receive-text' $BobProfile (@('mailbox','sync')+$networkArgs))
     Send-Text $BobProfile $bConversation $textB 'bob-text'
@@ -197,6 +225,6 @@ try {
     if (-not $passed) { throw 'Bidirectional history verified, but original Store outcomes remain unresolved.' }
 } finally {
     [ordered]@{scope=$(if($ResumeContact){'cli-retained-contact-bidirectional-text'}else{'cli-real-contact-bidirectional-text'});passed=$passed;reusedPublishedAccounts=[bool]$ReusePublishedAccounts;resumedContact=[bool]$ResumeContact;maximumExactAttempts=$(if($RetryExactTransient){2}else{1});intentRevision=$IntentRevision;startedUtc=$started.ToString('o');finishedUtc=[DateTime]::UtcNow.ToString('o');
-        executableSha256=$exeHash.ToLowerInvariant();runtimeInputSha256=$runtimeFingerprint;deviceAcceptance=$false;observeUnknownStore=[bool]$ObserveUnknownStore;unsettledStoreCount=$unsettledStores.Count;bidirectionalHistoryVerified=$historyVerified;steps=$steps.ToArray()} |
+        scenarioSha256=$scenarioHash;textRevision=$TextRevision;executableSha256=$exeHash.ToLowerInvariant();runtimeInputSha256=$runtimeFingerprint;deviceAcceptance=$false;observeUnknownStore=[bool]$ObserveUnknownStore;unsettledStoreCount=$unsettledStores.Count;bidirectionalHistoryVerified=$historyVerified;steps=$steps.ToArray()} |
         ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $run 'receipt.json') -Encoding utf8
 }
