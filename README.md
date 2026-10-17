@@ -34,12 +34,71 @@ DPAPI aggregate protection and the same Shared SQLCipher/account owner. Commands
 hold an exclusive per-profile lease; no MAUI, Android or production state is opened.
 Keep QA profiles for restart/recovery testing instead of resetting after failures.
 
+Every aggregate decryption uses native DPAPI; no plaintext decryption cache is
+retained by the adapter. Numeric `protectionWork` reports native call counts/time
+only. `networkWork` groups public HTTP by a closed endpoint category;
+it contains counts/status totals/durations, never URLs, bodies or identifiers.
+
+## Real network and business commands
+
+The initial network adapter consumes the existing **public** `deep-dev-current`
+bundle (`deep-dev.json`, genesis XNA1/DTS1/ADH1 and public `dev-ca.crt`). It reads
+no operator/node/signer secrets. Pass its directory as `--bootstrap` and an
+explicit canonical HTTPS origin as `--registry`; the bundle network must equal
+`--network`. The CA is app-scoped, with hostname/EKU/current-chain/revocation
+checks unchanged. No global trust import or TLS bypass.
+
+Alongside `--profile` and `--network`, commands accept:
+
+| Command | Additional options |
+| --- | --- |
+| `network verify` | `--bootstrap`, `--registry` |
+| `contact request` | network options, `--address`, `--operation` |
+| `contact accept` | network options, `--conversation`, `--operation` |
+| `contact stop` | network options, `--operation` |
+| `contact list`, `contact operations` | none; protected local projections only |
+| `mailbox sync` | network options; one actual page/materialization/ACK |
+| `message queue` | network options, `--conversation`, `--text` |
+| `message send` | network options, `--conversation`, `--operation`, `--text` |
+| `message list` | `--conversation`; explicitly returns message history |
+| `message pending` | none; returns existing exact pending text commands |
+
+Logical operation IDs are nonzero **32 bytes /64 lowercase hex**; conversation
+IDs are32 bytes /64 hex. `queue` durably authors one message and returns its
+operation. `send` retries that exact operation/text, never queues a replacement.
+`stored` means verified mailbox storage, not recipient acceptance/delivery.
+`stop` uses the existing account-owned cancellation path, not remote recall or
+proof of noncommit. Unknown outcome remains retained. Commands have a120s
+whole-operation budget; neither protocol windows nor peer deadlines are extended.
+Failures emit only closed phase/category/check and owned method/IL metadata.
+
+`eng/Invoke-ContactTextE2E.ps1` launches separate real CLI processes for two
+persistent profiles: publication → request → mailbox receive → consent → text
+both ways → cold history/duplicate checks. Arguments/results containing addresses,
+operation IDs and plaintext remain in memory, never in its evidence receipts.
+Use a fresh `-RunDirectory` beneath this repository's ignored `artifacts/`.
+The driver fingerprints the complete bounded runtime output tree before/after
+commands, including managed assemblies, native providers and configuration.
+An apphost EXE hash alone does not identify .NET application code. The receipt
+contains the combined digest, not runtime paths or profile state.
+`-ReusePublishedAccounts` resumes already initialized profiles without repeating
+setup; it supplies no authority and all business/currentness checks still run.
+`-IntentRevision` is an explicit separate QA command, not automatic retry: never
+advance it to overwrite or silently evade an unresolved original intent.
+`-ResumeContact` continues two already materialized, unique contacts only if
+their exact conversation IDs and opposite initiator roles match. It still sends
+the same owned acceptance operation and requires actual peer acceptance before
+text. Its receipt is explicitly a **retained-contact continuation**, not evidence
+of a new Initial publication/store in that run; qualify the earlier receive
+separately and use the full scenario for final fresh-cycle acceptance.
+
 ## Next, in order
 
 The authoritative sprint/acceptance plan is
 [CLI-first in XPointLabs](../docs/architecture/IMPLEMENTATION-PLAN-V1.md#cli-first--первый-приоритет-внутри-s05):
 shared headless composition → network/contact/consent → bidirectional text and
-recovery → files/images → groups. Network commands are **not implemented yet**.
+recovery → files/images → groups. Network commands are implemented; connected
+contact/text acceptance is still being debugged, not claimed complete.
 Do not interpret local account creation as network, message or device E2E PASS.
 Two CLI profiles will use the real local Registry/three-node Docker topology,
 existing TLS/authority/native crypto and persistent storage. No mock-success path.

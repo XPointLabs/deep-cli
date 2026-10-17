@@ -37,13 +37,33 @@ public sealed class AccountTests
     [Fact]
     public void NativeDpapiRoundtripRejectsTamperingAndEmptySecrets()
     {
-        var protector = new WindowsProfile.CurrentUserProtector();
+        using var protector = new WindowsProfile.CurrentUserProtector();
         var clear = RandomNumberGenerator.GetBytes(32);
         var encrypted = protector.Protect(clear);
         Assert.Equal(clear, protector.Unprotect(encrypted));
         encrypted[^1] ^= 1;
         Assert.Throws<CryptographicException>(() => protector.Unprotect(encrypted));
         Assert.Throws<ArgumentException>(() => protector.Protect([]));
+    }
+
+    [Fact]
+    public void EveryDecryptionAuthenticatesNativelyAndReturnsDetachedCopies()
+    {
+        var clear = RandomNumberGenerator.GetBytes(32);
+        byte[] encrypted;
+        using (var writer = new WindowsProfile.CurrentUserProtector()) encrypted = writer.Protect(clear);
+        var reader = new WindowsProfile.CurrentUserProtector();
+        Assert.Equal(clear, reader.Unprotect(encrypted));
+        Assert.Equal(1, reader.NativeUnprotects);
+        var first = reader.Unprotect(encrypted); first[0] ^= 1;
+        Assert.Equal(clear, reader.Unprotect(encrypted));
+        Assert.Equal(3, reader.NativeUnprotects);
+        var tampered = encrypted.ToArray(); tampered[^1] ^= 1;
+        Assert.Throws<CryptographicException>(() => reader.Unprotect(tampered));
+        Assert.Equal(4, reader.NativeUnprotects);
+        Assert.Equal(clear, reader.Unprotect(encrypted));
+        reader.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => reader.Unprotect(encrypted));
     }
 
     [Fact]

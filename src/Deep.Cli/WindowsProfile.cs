@@ -11,6 +11,7 @@ internal sealed class WindowsProfile : IDisposable
 {
     private readonly FileStream commandLease;
     private readonly JournaledDeepSecureStorage storage;
+    private readonly CurrentUserProtector protector = new();
     internal DeepIdV2AccountService Accounts { get; }
 
     private WindowsProfile(string root, byte[] network)
@@ -20,11 +21,11 @@ internal sealed class WindowsProfile : IDisposable
         try
         {
             storage = new JournaledDeepSecureStorage(Path.Combine(root, "deep-store-v2", "secure-storage.dss"),
-                new CurrentUserProtector());
+                protector);
             Accounts = new DeepIdV2AccountService(storage, Path.Combine(root, "deep-store-v2"), network,
                 1, new SystemClock(), DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
         }
-        catch { storage?.Dispose(); commandLease.Dispose(); throw; }
+        catch { storage?.Dispose(); protector.Dispose(); commandLease.Dispose(); throw; }
     }
 
     internal static WindowsProfile Open(CommandLine command)
@@ -58,25 +59,53 @@ internal sealed class WindowsProfile : IDisposable
                 throw new IOException("Profile reparse point rejected.");
     }
 
-    public void Dispose() { storage.Dispose(); commandLease.Dispose(); }
+    public void Dispose() { try { storage.Dispose(); } finally { protector.Dispose(); commandLease.Dispose(); } }
 
     // Platform envelope only: raw DPAPI output, no new Deep wire/record grammar,
     // no application-owned key file and no device namespace compatibility reader.
-    internal sealed class CurrentUserProtector : IDeepSecretProtector
+    internal sealed class CurrentUserProtector : IDeepSecretProtector, IDisposable
     {
         private static readonly byte[] Entropy = "Deep/Cli/Store/V2/Windows-DPAPI"u8.ToArray();
+        private readonly object gate = new();
+        private bool disposed;
+        internal long NativeUnprotects { get; private set; }
         public byte[] Protect(ReadOnlySpan<byte> plaintext)
         {
-            if (plaintext.IsEmpty) throw new ArgumentException("Empty secret rejected.");
-            var copy = plaintext.ToArray();
-            try { return ProtectedData.Protect(copy, Entropy, DataProtectionScope.CurrentUser); }
-            finally { CryptographicOperations.ZeroMemory(copy); }
+            lock (gate)
+            {
+                ObjectDisposedException.ThrowIf(disposed, this);
+                if (plaintext.IsEmpty) throw new ArgumentException("Empty secret rejected.");
+                var copy = plaintext.ToArray();
+                var started = System.Diagnostics.Stopwatch.GetTimestamp();
+                try
+                {
+                    return ProtectedData.Protect(copy, Entropy, DataProtectionScope.CurrentUser);
+                }
+                finally { CryptographicOperations.ZeroMemory(copy); ProtectionWork.Record(true, started); }
+            }
         }
         public byte[] Unprotect(ReadOnlySpan<byte> protectedBytes)
         {
-            var copy = protectedBytes.ToArray();
-            try { return ProtectedData.Unprotect(copy, Entropy, DataProtectionScope.CurrentUser); }
-            finally { CryptographicOperations.ZeroMemory(copy); }
+            lock (gate)
+            {
+                ObjectDisposedException.ThrowIf(disposed, this);
+                var copy = protectedBytes.ToArray();
+                var started = System.Diagnostics.Stopwatch.GetTimestamp();
+                try
+                {
+                    NativeUnprotects++;
+                    return ProtectedData.Unprotect(copy, Entropy, DataProtectionScope.CurrentUser);
+                }
+                finally { CryptographicOperations.ZeroMemory(copy); ProtectionWork.Record(false, started); }
+            }
+        }
+        public void Dispose()
+        {
+            lock (gate)
+            {
+                if (disposed) return;
+                disposed = true;
+            }
         }
     }
 }
