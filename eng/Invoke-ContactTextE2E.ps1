@@ -92,7 +92,7 @@ function Invoke-Client([string]$Phase, [string]$ClientProfile, [string[]]$Comman
                 # Scenario scheduling only, not authority or proof of noncommit.
                 # At most ONE new process repeats the IDENTICAL owned command.
                 # Never repeat account creation or non-idempotent text queueing.
-                $eligible = $Phase -in @('contact-request','contact-accept','bob-receive-request',
+                $eligible = $Phase -in @('alice-verify','bob-verify','contact-request','contact-accept','bob-receive-request',
                     'alice-receive-accept','alice-text-send','bob-text-send','bob-receive-text','alice-receive-text','dedup-poll')
                 $transient = @($failure.diagnostic.causes | Where-Object {
                     $_.category -in @('OutcomeUnknown','Cancelled','IngressRetryableBeforeForward') -or $_.check -ceq 'ClaimOutcomeUnknown'
