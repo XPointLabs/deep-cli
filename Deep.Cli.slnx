@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/Deep.Cli/Deep.Cli.csproj" />
+  <Project Path="tests/Deep.Cli.Tests/Deep.Cli.Tests.csproj" />
+</Solution>
