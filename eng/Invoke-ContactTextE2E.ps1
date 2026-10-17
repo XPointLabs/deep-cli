@@ -6,6 +6,7 @@ param(
     [switch]$ReusePublishedAccounts,
     [switch]$ResumeContact,
     [switch]$RetryExactTransient,
+    [switch]$ObserveUnknownStore,
     [ValidateRange(0,100)][int]$IntentRevision = 0,
     [ValidatePattern('^[a-z][a-z0-9-]{0,31}$')][string]$AliceProfile = 'cli-e2e-alice',
     [ValidatePattern('^[a-z][a-z0-9-]{0,31}$')][string]$BobProfile = 'cli-e2e-bob'
@@ -48,10 +49,11 @@ function Get-RuntimeInputFingerprint {
 $runtimeFingerprint = Get-RuntimeInputFingerprint
 [void](New-Item -ItemType Directory -Path $run)
 $steps = [Collections.Generic.List[object]]::new()
+$unsettledStores = [Collections.Generic.List[string]]::new()
 $started = [DateTime]::UtcNow
 $networkArgs = @('--bootstrap', $BootstrapDirectory, '--registry', $RegistryOrigin)
 
-function Invoke-Client([string]$Phase, [string]$ClientProfile, [string[]]$Command, [int]$Attempt = 1) {
+function Invoke-Client([string]$Phase, [string]$ClientProfile, [string[]]$Command, [int]$Attempt = 1, [bool]$AllowUnknownStore = $false) {
     if ((Get-RuntimeInputFingerprint) -cne $runtimeFingerprint) { throw 'CLI runtime inputs changed during scenario.' }
     $start = [Diagnostics.ProcessStartInfo]::new($exe)
     $start.UseShellExecute = $false; $start.CreateNoWindow = $true
@@ -98,8 +100,11 @@ function Invoke-Client([string]$Phase, [string]$ClientProfile, [string[]]$Comman
                     $_.category -in @('OutcomeUnknown','Cancelled','IngressRetryableBeforeForward') -or $_.check -ceq 'ClaimOutcomeUnknown'
                 }).Count -gt 0
                 if ($RetryExactTransient -and $Attempt -eq 1 -and $eligible -and $transient) {
-                    return Invoke-Client ($Phase+'-exact-retry') $ClientProfile $Command 2
+                    return Invoke-Client ($Phase+'-exact-retry') $ClientProfile $Command 2 $AllowUnknownStore
                 }
+                if ($AllowUnknownStore -and @($failure.diagnostic.causes | Where-Object {
+                    $_.category -in @('OutcomeUnknown','Cancelled')
+                }).Count -gt 0) { return [pscustomobject]@{ unsettledStore = $true } }
             }
             throw 'CLI operation failed; exact account and pending operations retained.'
         }
@@ -124,9 +129,11 @@ function Send-Text([string]$ClientProfile, [string]$Conversation, [string]$Text,
         $queued = Invoke-Client ($Label+'-queue') $ClientProfile (@('message','queue','--conversation',$Conversation,'--text',$Text)+$networkArgs)
         $op = $queued.operation
     } else { return }
-    [void](Invoke-Client ($Label+'-send') $ClientProfile (@('message','send','--conversation',$Conversation,'--operation',$op,'--text',$Text)+$networkArgs))
+    $sent = Invoke-Client ($Label+'-send') $ClientProfile (@('message','send','--conversation',$Conversation,'--operation',$op,'--text',$Text)+$networkArgs) 1 ([bool]$ObserveUnknownStore)
+    if ($sent.PSObject.Properties.Name -contains 'unsettledStore') { $unsettledStores.Add($Label) }
 }
 $passed = $false
+$historyVerified = $false
 try {
     foreach ($p in @($AliceProfile,$BobProfile)) {
         $label = if ($p -ceq $AliceProfile) { 'alice' } else { 'bob' }
@@ -185,9 +192,11 @@ try {
         Require (@($messages.items | Where-Object { $_.local -and $_.text -ceq $localText }).Count -eq 1) 'Local text not materialized exactly once.'
         Require (@($messages.items | Where-Object { -not $_.local -and $_.text -ceq $remoteText }).Count -eq 1) 'Remote text not received exactly once.'
     }
-    $passed = $true
+    $historyVerified = $true
+    $passed = $unsettledStores.Count -eq 0
+    if (-not $passed) { throw 'Bidirectional history verified, but original Store outcomes remain unresolved.' }
 } finally {
     [ordered]@{scope=$(if($ResumeContact){'cli-retained-contact-bidirectional-text'}else{'cli-real-contact-bidirectional-text'});passed=$passed;reusedPublishedAccounts=[bool]$ReusePublishedAccounts;resumedContact=[bool]$ResumeContact;maximumExactAttempts=$(if($RetryExactTransient){2}else{1});intentRevision=$IntentRevision;startedUtc=$started.ToString('o');finishedUtc=[DateTime]::UtcNow.ToString('o');
-        executableSha256=$exeHash.ToLowerInvariant();runtimeInputSha256=$runtimeFingerprint;deviceAcceptance=$false;steps=$steps.ToArray()} |
+        executableSha256=$exeHash.ToLowerInvariant();runtimeInputSha256=$runtimeFingerprint;deviceAcceptance=$false;observeUnknownStore=[bool]$ObserveUnknownStore;unsettledStoreCount=$unsettledStores.Count;bidirectionalHistoryVerified=$historyVerified;steps=$steps.ToArray()} |
         ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $run 'receipt.json') -Encoding utf8
 }

@@ -93,6 +93,12 @@ verify actual native/protected consent in Shared, not this scheduling hint.
 Its receipt is explicitly a **retained-contact continuation**, not evidence
 of a new Initial publication/store in that run; qualify the earlier receive
 separately and use the full scenario for final fresh-cycle acceptance.
+`-ObserveUnknownStore` is diagnostic scheduling: after those exact attempts,
+an uncertain text Store may continue to the real inbox and reverse direction.
+Failed steps remain in the receipt. Any unresolved Store forces `passed=false`
+and a nonzero terminal even if both cold histories are verified. It cannot
+turn an unknown into Stored/Delivered or queue a replacement logical message.
+
 `-RetryExactTransient` tests one bounded cold-process retry of an identical
 idempotent business command after an uncertain/cancelled or retryable-before-
 forward result. It never repeats account creation/text queueing, changes an
