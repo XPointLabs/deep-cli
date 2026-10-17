@@ -68,8 +68,8 @@ IDs are32 bytes /64 hex. `queue` durably authors one message and returns its
 operation. `send` retries that exact operation/text, never queues a replacement.
 `stored` means verified mailbox storage, not recipient acceptance/delivery.
 `stop` uses the existing account-owned cancellation path, not remote recall or
-proof of noncommit. Unknown outcome remains retained. Commands have a120s
-whole-operation budget; neither protocol windows nor peer deadlines are extended.
+proof of noncommit. Unknown outcome remains retained. The bounded host budget
+below does not extend protocol windows or peer deadlines.
 Failures emit only closed phase/category/check and owned method/IL metadata.
 
 `eng/Invoke-ContactTextE2E.ps1` launches separate real CLI processes for two
@@ -100,6 +100,12 @@ remain in the receipt; all delivery/history checks must still pass.
 Closed failure diagnostics distinguish the known ingress control classes
 MalformedFrame/WrongOrigin/Saturated/Unavailable from arbitrary exception text.
 This does not authorize automatic retries or imply end-to-end noncommit.
+
+Each CLI command has a bounded five-minute host budget and still accepts
+Ctrl+C. The black-box driver allows30seconds for orderly exit beyond that.
+This covers multi-hop business preparation; individual transport deadlines and
+all signed proof/request/grant lifetimes remain independently enforced. A
+cancelled/unknown attempt is retained, never converted to successful delivery.
 
 ## Next, in order
 

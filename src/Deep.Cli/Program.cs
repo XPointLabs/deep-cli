@@ -6,10 +6,15 @@ namespace Deep.Cli;
 
 internal static class Program
 {
+    internal static readonly TimeSpan CommandTimeout = TimeSpan.FromMinutes(5);
     private static async Task<int> Main(string[] args)
     {
         using var cancellation = new CancellationTokenSource();
-        cancellation.CancelAfter(TimeSpan.FromSeconds(120));
+        // A business command composes several independently bounded proof,
+        // claim, grant and Store hops. Its outer host budget must not cancel a
+        // healthy final Store merely because preparation took two minutes.
+        // Signed windows and each transport's shorter deadlines still apply.
+        cancellation.CancelAfter(CommandTimeout);
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cancellation.Cancel(); };
         return await RunAsync(args, Console.Out, Console.Error, cancellation.Token);
     }

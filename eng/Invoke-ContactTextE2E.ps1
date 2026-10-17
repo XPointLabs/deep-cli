@@ -62,7 +62,7 @@ function Invoke-Client([string]$Phase, [string]$ClientProfile, [string[]]$Comman
     try {
         if (-not $process.Start()) { throw 'CLI process not started.' }
         $stdout = $process.StandardOutput.ReadToEndAsync(); $stderr = $process.StandardError.ReadToEndAsync()
-        if (-not $process.WaitForExit(150000)) {
+        if (-not $process.WaitForExit(330000)) {
             $process.Kill($true)
             $steps.Add([pscustomobject]@{phase=$Phase;exit=-1;milliseconds=$watch.ElapsedMilliseconds;outcome='unknown'})
             throw 'CLI process deadline; retained work must not be reminted.'

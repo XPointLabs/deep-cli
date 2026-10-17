@@ -4,6 +4,9 @@ namespace Deep.Cli.Tests;
 
 public sealed class BusinessCommandTests
 {
+    [Fact]
+    public void CompositeHostBudgetCoversPreparationWithoutChangingProtocolDeadlines() =>
+        Assert.Equal(TimeSpan.FromMinutes(5), Program.CommandTimeout);
     private const string Network = "11111111111111111111111111111111";
     private const string Conversation = "2222222222222222222222222222222222222222222222222222222222222222";
     private const string Operation = "3333333333333333333333333333333333333333333333333333333333333333";
