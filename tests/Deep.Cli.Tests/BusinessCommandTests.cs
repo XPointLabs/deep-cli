@@ -92,4 +92,20 @@ public sealed class BusinessCommandTests
         Assert.Equal(category, json.RootElement.GetProperty("causes")[0].GetProperty("category").GetString());
         Assert.DoesNotContain("DO-NOT-EXPORT", json.RootElement.GetRawText());
     }
+
+    [Theory]
+    [InlineData("MalformedFrame")]
+    [InlineData("WrongOrigin")]
+    [InlineData("Saturated")]
+    [InlineData("Unavailable")]
+    public void BeforeForwardControlClassIsClosedAndDoesNotExportArbitraryText(string errorClass)
+    {
+        var type = typeof(Deep.Client.Shared.Services.DeepIdV2AccountService).Assembly.GetType(
+            "Deep.Client.Shared.Services.PrivacyIngressRejectedBeforeForwardException", throwOnError: true)!;
+        var error = (Exception)Activator.CreateInstance(type, System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.NonPublic, binder: null,
+            args: [true, $"Privacy ingress rejected the request before forwarding ({errorClass}).", null], culture: null)!;
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(new CliBusinessException("ContactRequest", error).ClosedDiagnostic()));
+        Assert.Equal("Ingress" + errorClass, json.RootElement.GetProperty("causes")[0].GetProperty("check").GetString());
+    }
 }

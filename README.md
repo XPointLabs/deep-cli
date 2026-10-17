@@ -97,6 +97,10 @@ forward result. It never repeats account creation/text queueing, changes an
 operation ID, or extends authority. Both attempts and every failure diagnostic
 remain in the receipt; all delivery/history checks must still pass.
 
+Closed failure diagnostics distinguish the known ingress control classes
+MalformedFrame/WrongOrigin/Saturated/Unavailable from arbitrary exception text.
+This does not authorize automatic retries or imply end-to-end noncommit.
+
 ## Next, in order
 
 The authoritative sprint/acceptance plan is
