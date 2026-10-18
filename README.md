@@ -41,30 +41,46 @@ it contains counts/status totals/durations, never URLs, bodies or identifiers.
 
 ## Real network and business commands
 
-The DR-0143 group candidate requires newly created isolated CLI profiles:
+The DR-0144 multi-account group candidate requires newly created isolated CLI profiles:
 application SQL schema17, ordinary journal9 and mandatory protected group
-registration. Older profiles reject without migration; keep them and their
+generation2 registration. Older profiles reject without migration; keep them and their
 earlier receipts, do not reset device/production accounts.
 
 Group commands use the same network options and Shared owner:
 `group create --name`, `group list`, `group messages --group`, and
 `group invite/accept/advance/send/flush --group --conversation` (`send` also
-requires `--text`). The candidate supports two accounts/one current device each.
+requires `--text`). The candidate supports multiple accounts/one current device each; three-account
+correctness is tested separately from the final scale/device gates.
 After the invitee's explicit acceptance has been received, the owner runs
-`advance` to publish the membership commit; acceptance alone is not membership.
+`advance` to retain and send the membership commit through ordinary mailboxes;
+acceptance alone is not membership. This candidate does not implement GSR1
+publish-complete or long-offline recovery, even when every mailbox Store passes.
 `send` creates a new logical group message; after any uncertain result use
-`flush`, never repeat `send` to retry. Flush drains the original protected batch
+`flush`, never repeat `send` to retry. The selected conversation identifies an existing session, not a recipient-only
+send: Shared derives the complete current membership and requires an accepted
+session for every remote target before saving one batch. Flush drains all targets
+of the original protected batch
 with its original operations/sequences and independently verified Store results.
-`stored` is not remote delivery. `eng/Invoke-GroupE2E.ps1` verifies both CLI
+`stored` is not remote delivery. `eng/Invoke-ThreeClientGroupE2E.ps1` verifies three independent CLI
+profiles, sequential membership additions, full two-target fanout and cold/dedup
+history. `eng/Invoke-GroupE2E.ps1` retains the two-profile scenario and verifies both CLI
 histories and durable ACKs through the real local network; it is not GSR1
 long-offline, full multi-device group or Windows/Android release acceptance.
+`eng/Invoke-ThreeClientGroupContinuation.ps1` continues the completed three-message
+group without reset: Bob and Carol send before any recipient polls, exercising a
+two-peer ACK page and exactly five cold-history messages. Resume this continuation
+after an uncertain result; never run the first-round driver as a fresh scenario
+against a group that already has second-round commands.
 Group batch commands have a bounded30-minute host budget; every individual
 transport deadline and signed authority window remains independently enforced.
 The driver may resume already published profiles with `-ReusePublishedAccounts`.
+Run connected scenario scripts under PowerShell7.6.5 (`pwsh`), not Windows
+PowerShell5.1; native source-test wrappers still select5.1 as the workspace requires.
 After a completed cycle, `-GroupRevision 1` explicitly starts a separate named
 QA group without deleting the old group/history; never advance it to evade
 unknown work. Retry the same revision and its original `flush` operations.
-Detailed evidence and remaining limits: [group checkpoint](docs/testing/cli-groups-2026-10-18.md).
+Detailed evidence and remaining limits: [three-CLI checkpoint](docs/testing/cli-three-groups-2026-10-18.md)
+and the earlier [two-CLI checkpoint](docs/testing/cli-groups-2026-10-18.md).
 
 The initial network adapter consumes the existing **public** `deep-dev-current`
 bundle (`deep-dev.json`, genesis XNA1/DTS1/ADH1 and public `dev-ca.crt`). It reads

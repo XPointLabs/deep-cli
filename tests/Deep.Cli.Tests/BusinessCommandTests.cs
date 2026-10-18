@@ -69,6 +69,33 @@ public sealed class BusinessCommandTests
         Assert.Equal(8, parsed.RootElement.GetProperty("causes").GetArrayLength());
     }
 
+    [Theory]
+    [InlineData("GrantStart", "RetainedReadGrantStart")]
+    [InlineData("IssuedAfterCurrentUpper", "RetainedReadIssuedAfterCurrentUpper")]
+    [InlineData("DO-NOT-EXPORT", "Unclassified")]
+    public void RetainedReadDiagnosticsExposeOnlyClosedReasons(string input, string expected)
+    {
+        var error = new System.Security.Cryptography.CryptographicException("DO-NOT-EXPORT");
+        error.Data["Deep.MailboxRetainedRead.Check"] = input;
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(new CliBusinessException("MailboxSync", error).ClosedDiagnostic()));
+        Assert.Equal(expected, json.RootElement.GetProperty("causes")[0].GetProperty("check").GetString());
+        Assert.DoesNotContain("DO-NOT-EXPORT", json.RootElement.GetRawText());
+    }
+
+    [Theory]
+    [InlineData("Held pre-key authoring no longer binds protected network custody.", "EndpointPairNetworkChanged")]
+    [InlineData("Refreshed messaging endpoints no longer bind owned network custody.", "EndpointPairNetworkChanged")]
+    [InlineData("Held authoring directory freshness expired.", "EndpointPairDirectoryExpired")]
+    [InlineData("DO-NOT-EXPORT", "Unclassified")]
+    public void EndpointPairDiagnosticsAreClosedAndGrantNoAuthority(string message, string expected)
+    {
+        var error = new System.Security.Cryptography.CryptographicException(message);
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(new CliBusinessException("MailboxSync", error).ClosedDiagnostic()));
+        Assert.Equal(expected, json.RootElement.GetProperty("causes")[0].GetProperty("check").GetString());
+        Assert.Equal("ProtectedState", json.RootElement.GetProperty("causes")[0].GetProperty("category").GetString());
+        Assert.DoesNotContain("DO-NOT-EXPORT", json.RootElement.GetRawText());
+    }
+
     [Fact]
     public void CancellationKeepsBusinessPhaseWithoutInventingForwardingCertainty()
     {

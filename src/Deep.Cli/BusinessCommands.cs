@@ -148,6 +148,7 @@ internal sealed class CliBusinessException(string phase, Exception error) : Exce
             {
                 ClientMailboxDispatchOutcomeUnknownException => "OutcomeUnknown",
                 DeepIdV2ContactRetryExpiredException => "ContactRetryExpired",
+                TimeoutException => "Timeout",
                 CryptographicException => "ProtectedState",
                 HttpRequestException => "HttpFailure",
                 IOException => "IoFailure",
@@ -161,9 +162,23 @@ internal sealed class CliBusinessException(string phase, Exception error) : Exce
             var check = "Unclassified";
             var exceptionType = current.GetType();
             if (current is CryptographicException && exceptionType.Assembly == typeof(CryptographicException).Assembly)
+                check = current.Message switch
+                {
+                    "Held pre-key authoring no longer binds protected network custody." => "EndpointPairNetworkChanged",
+                    "Refreshed messaging endpoints no longer bind owned network custody." => "EndpointPairNetworkChanged",
+                    "Held authoring directory freshness expired." => "EndpointPairDirectoryExpired",
+                    "The DID2 proof is older than the protected directory floor." => "EndpointPairDirectoryFloorAdvanced",
+                    "The DID2 directory proof expired before account handoff." => "EndpointPairDirectoryExpiredBeforeHandoff",
+                    _ => check
+                };
+            if (current is CryptographicException && exceptionType.Assembly == typeof(CryptographicException).Assembly)
                 foreach (var artifact in new[] { "XNA1", "XNV1", "XNH1", "ADH1", "DeviceCertificate", "DCA1", "PMT2", "XRA1", "PMS2", "XRC1", "XSS1", "XIR1V2", "XRR1", "ThresholdAuthoring", "ResolveRequest" })
                     foreach (var reason in new[] { "InvalidInterval", "NotBefore", "Expiry" })
                         if (current.Message == $"DID2 route time coverage failed ({artifact}; {reason}).") check = "RouteTime" + artifact + reason;
+            if (current is CryptographicException && exceptionType.Assembly == typeof(CryptographicException).Assembly &&
+                current.Data["Deep.MailboxRetainedRead.Check"] is string retainedReason &&
+                new[] { "GrantHorizon", "GrantOverlap", "RequestInterval", "GrantStart", "ResponseDeadline", "IssuedBeforeRequest", "IssuedAfterRequest", "IssuedAfterCurrentUpper" }.Contains(retainedReason, StringComparer.Ordinal))
+                check = "RetainedRead" + retainedReason;
             if (exceptionType.Assembly == typeof(DeepIdV2AccountService).Assembly && exceptionType.IsSealed &&
                 exceptionType.FullName == "Deep.Client.Shared.Services.PrivacyIngressRejectedBeforeForwardException")
             {
@@ -193,16 +208,20 @@ internal sealed class CliBusinessException(string phase, Exception error) : Exce
                     "DID2 pre-key claim is unavailable (OutcomeUnknown)." => "ClaimOutcomeUnknown",
                     _ => "Unclassified"
                 };
-            var method = "Unavailable"; var il = -1;
+            var method = "Unavailable"; var il = -1; var trail = new List<object>();
             foreach (var frame in new StackTrace(current, false).GetFrames().Take(32))
             {
                 var member = frame.GetMethod(); var type = member?.DeclaringType;
                 if (type?.Assembly.GetName().Name is not ("Deep.Client.Shared" or "Deep.Protocol" or "Deep.Protocol.MembershipRoutes")) continue;
                 var candidate = type.FullName + "." + member!.Name;
                 if (candidate.Length <= 240 && Regex.IsMatch(candidate, "\\A[A-Za-z0-9_.+<>`]+\\z"))
-                { method = candidate; il = Math.Clamp(frame.GetILOffset(), -1, 1048575); break; }
+                {
+                    var offset = Math.Clamp(frame.GetILOffset(), -1, 1048575);
+                    if (trail.Count == 0) { method = candidate; il = offset; }
+                    trail.Add(new { method = candidate, il = offset }); if (trail.Count == 8) break;
+                }
             }
-            rows.Add(new { category, check, method, il });
+            rows.Add(new { category, check, method, il, trail });
         }
         return new { phase, causes = rows };
     }
