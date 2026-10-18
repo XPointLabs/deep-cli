@@ -41,6 +41,31 @@ it contains counts/status totals/durations, never URLs, bodies or identifiers.
 
 ## Real network and business commands
 
+The DR-0143 group candidate requires newly created isolated CLI profiles:
+application SQL schema17, ordinary journal9 and mandatory protected group
+registration. Older profiles reject without migration; keep them and their
+earlier receipts, do not reset device/production accounts.
+
+Group commands use the same network options and Shared owner:
+`group create --name`, `group list`, `group messages --group`, and
+`group invite/accept/advance/send/flush --group --conversation` (`send` also
+requires `--text`). The candidate supports two accounts/one current device each.
+After the invitee's explicit acceptance has been received, the owner runs
+`advance` to publish the membership commit; acceptance alone is not membership.
+`send` creates a new logical group message; after any uncertain result use
+`flush`, never repeat `send` to retry. Flush drains the original protected batch
+with its original operations/sequences and independently verified Store results.
+`stored` is not remote delivery. `eng/Invoke-GroupE2E.ps1` verifies both CLI
+histories and durable ACKs through the real local network; it is not GSR1
+long-offline, full multi-device group or Windows/Android release acceptance.
+Group batch commands have a bounded30-minute host budget; every individual
+transport deadline and signed authority window remains independently enforced.
+The driver may resume already published profiles with `-ReusePublishedAccounts`.
+After a completed cycle, `-GroupRevision 1` explicitly starts a separate named
+QA group without deleting the old group/history; never advance it to evade
+unknown work. Retry the same revision and its original `flush` operations.
+Detailed evidence and remaining limits: [group checkpoint](docs/testing/cli-groups-2026-10-18.md).
+
 The initial network adapter consumes the existing **public** `deep-dev-current`
 bundle (`deep-dev.json`, genesis XNA1/DTS1/ADH1 and public `dev-ca.crt`). It reads
 no operator/node/signer secrets. Pass its directory as `--bootstrap` and an

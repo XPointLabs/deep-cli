@@ -28,6 +28,11 @@ internal static class BusinessCommands
                 return new { status = "ok", items = await accounts.ListPendingAttachmentOperationsAsync(ct) };
             if (command is { Area: "attachment", Operation: "operations" })
                 return new { status = "ok", items = await accounts.ListAttachmentOperationsAsync(ct) };
+            if (command is { Area: "group", Operation: "list" })
+                return new { status = "ok", items = await accounts.ListGroupsAsync(ct) };
+            if (command is { Area: "group", Operation: "messages" })
+                return new { status = "ok", items = (await accounts.ListGroupMessagesAsync(Convert.FromHexString(command.Group!), ct)).Select(item =>
+                    new { text = item.Text, local = item.IsLocalAuthor, sequence = item.Sequence }).ToArray() };
 
             DeepIdV2Conversation? conversation = null;
             if (command.Conversation is not null)
@@ -54,10 +59,27 @@ internal static class BusinessCommands
                 ("attachment", "send") => "AttachmentSend",
                 ("attachment", "queue") => "AttachmentQueue",
                 ("attachment", "download") => "AttachmentDownload",
+                ("group", "create" or "invite" or "accept" or "advance" or "send" or "flush") => "GroupWork",
                 _ => throw new ArgumentException("Unsupported business operation.")
             };
             if (phase == "NetworkVerify")
             { await network.VerifyAndPublishAsync(ct); return new { status = "ok", networkVerified = true, contactPublished = true }; }
+            if (phase == "GroupWork")
+            {
+                if (command.Operation == "create")
+                    return new { status = "created", group = await accounts.CreateGroupAsync(command.Name!, network.Source, ct) };
+                var group = Convert.FromHexString(command.Group!);
+                var completed = command.Operation switch
+                {
+                    "invite" => await accounts.InviteToGroupAsync(group, conversation!, network.Source, ct),
+                    "accept" => await accounts.AcceptGroupAsync(group, conversation!, network.Source, ct),
+                    "advance" => await accounts.AdvanceGroupAsync(group, conversation!, network.Source, ct),
+                    "send" => await accounts.SendGroupTextAsync(group, conversation!, command.Text!, network.Source, ct),
+                    "flush" => await accounts.FlushGroupAsync(group, conversation!, network.Source, ct),
+                    _ => throw new ArgumentException("Unsupported group operation.")
+                };
+                return new { status = "stored", completed };
+            }
             if (phase == "AttachmentPrepare")
             {
                 AttachmentFiles.RequireNoLinks(command.File!);
@@ -138,6 +160,10 @@ internal sealed class CliBusinessException(string phase, Exception error) : Exce
             };
             var check = "Unclassified";
             var exceptionType = current.GetType();
+            if (current is CryptographicException && exceptionType.Assembly == typeof(CryptographicException).Assembly)
+                foreach (var artifact in new[] { "XNA1", "XNV1", "XNH1", "ADH1", "DeviceCertificate", "DCA1", "PMT2", "XRA1", "PMS2", "XRC1", "XSS1", "XIR1V2", "XRR1", "ThresholdAuthoring", "ResolveRequest" })
+                    foreach (var reason in new[] { "InvalidInterval", "NotBefore", "Expiry" })
+                        if (current.Message == $"DID2 route time coverage failed ({artifact}; {reason}).") check = "RouteTime" + artifact + reason;
             if (exceptionType.Assembly == typeof(DeepIdV2AccountService).Assembly && exceptionType.IsSealed &&
                 exceptionType.FullName == "Deep.Client.Shared.Services.PrivacyIngressRejectedBeforeForwardException")
             {

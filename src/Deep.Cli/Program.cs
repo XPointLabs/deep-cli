@@ -8,8 +8,13 @@ internal static class Program
 {
     internal static readonly TimeSpan CommandTimeout = TimeSpan.FromMinutes(5);
     internal static readonly TimeSpan AttachmentTransferTimeout = TimeSpan.FromHours(3);
-    internal static TimeSpan TimeoutFor(string[] args) => args is ["attachment", "send" or "download", ..]
-        ? AttachmentTransferTimeout : CommandTimeout;
+    internal static readonly TimeSpan GroupBatchTimeout = TimeSpan.FromMinutes(30);
+    internal static TimeSpan TimeoutFor(string[] args) => args switch
+    {
+        ["attachment", "send" or "download", ..] => AttachmentTransferTimeout,
+        ["group", "invite" or "accept" or "advance" or "send" or "flush", ..] => GroupBatchTimeout,
+        _ => CommandTimeout
+    };
     private static async Task<int> Main(string[] args)
     {
         using var cancellation = new CancellationTokenSource();
@@ -34,7 +39,7 @@ internal static class Program
             if (args is ["--help"] or [])
             {
                 await output.WriteLineAsync("deep <area> <command> --profile <alias> --network <32 lowercase hex> [options]\n" +
-                    "account create/status/address; network verify; contact request/accept/stop/list/operations; mailbox sync; message queue/send/list/pending; attachment prepare/queue/send/pending/operations/list/download\n" +
+                    "account create/status/address; network verify; contact request/accept/stop/list/operations; mailbox sync; message queue/send/list/pending; attachment prepare/queue/send/pending/operations/list/download; group create/invite/accept/advance/send/flush/list/messages\n" +
                     "Network operations require --bootstrap <public dev bundle> --registry <canonical HTTPS origin>.\n" +
                     "request: --address --operation; accept: --conversation --operation; queue: --conversation --text; send: --conversation --operation --text.\n" +
                     "Windows host; isolated persistent DID2 profiles. Stored is not remote delivery.");

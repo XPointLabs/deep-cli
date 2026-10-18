@@ -17,6 +17,7 @@ internal sealed record CommandLine(string Operation, string Profile, byte[] Netw
     internal string? Logical { get; init; }
     internal string? Device { get; init; }
     internal string? Output { get; init; }
+    internal string? Group { get; init; }
     internal static CommandLine Parse(string[] args)
     {
         if (args.Length < 2) throw new ArgumentException("Unsupported command.");
@@ -36,6 +37,11 @@ internal sealed record CommandLine(string Operation, string Profile, byte[] Netw
             ("attachment", "queue") => ["--bootstrap", "--registry", "--conversation", "--asset"],
             ("attachment", "list") => ["--conversation"],
             ("attachment", "download") => ["--bootstrap", "--registry", "--conversation", "--logical", "--device", "--output"],
+            ("group", "create") => ["--bootstrap", "--registry", "--name"],
+            ("group", "list") => [],
+            ("group", "messages") => ["--group"],
+            ("group", "invite" or "accept" or "advance" or "flush") => ["--bootstrap", "--registry", "--conversation", "--group"],
+            ("group", "send") => ["--bootstrap", "--registry", "--conversation", "--group", "--text"],
             _ => throw new ArgumentException("Unsupported command.")
         };
         var allowed = new HashSet<string>(["--profile", "--network", .. extra], StringComparer.Ordinal);
@@ -60,7 +66,7 @@ internal sealed record CommandLine(string Operation, string Profile, byte[] Netw
             (!Regex.IsMatch(operation, "\\A[0-9a-f]{64}\\z") || operation.All(c => c == '0')) ||
             options.TryGetValue("--conversation", out var conversation) && !Regex.IsMatch(conversation, "\\A[0-9A-Fa-f]{64}\\z"))
             throw new ArgumentException("Invalid operation or conversation identifier.");
-        foreach (var selector in new[] { "--asset", "--logical", "--device" })
+        foreach (var selector in new[] { "--asset", "--logical", "--device", "--group" })
             if (options.TryGetValue(selector, out var id) && (!Regex.IsMatch(id, "\\A[0-9a-f]{64}\\z") || id.All(c => c == '0')))
                 throw new ArgumentException("Exact attachment selector required.");
         foreach (var path in new[] { "--file", "--output" })
@@ -72,7 +78,8 @@ internal sealed record CommandLine(string Operation, string Profile, byte[] Netw
             Address = options.GetValueOrDefault("--address"), Conversation = options.GetValueOrDefault("--conversation")?.ToUpperInvariant(),
             OperationId = options.GetValueOrDefault("--operation"), Text = options.GetValueOrDefault("--text"),
             File = options.GetValueOrDefault("--file"), MediaType = options.GetValueOrDefault("--media"), Asset = options.GetValueOrDefault("--asset"),
-            Logical = options.GetValueOrDefault("--logical"), Device = options.GetValueOrDefault("--device"), Output = options.GetValueOrDefault("--output")
+            Logical = options.GetValueOrDefault("--logical"), Device = options.GetValueOrDefault("--device"), Output = options.GetValueOrDefault("--output"),
+            Group = options.GetValueOrDefault("--group")
         };
     }
 }
