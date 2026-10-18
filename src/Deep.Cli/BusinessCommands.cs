@@ -24,6 +24,10 @@ internal static class BusinessCommands
             if (command is { Area: "message", Operation: "pending" })
                 return new { status = "ok", items = (await accounts.ListPendingTextOperationsAsync(ct)).Select(x => new
                 { operation = Convert.ToHexStringLower(x.LogicalOperation.Span), conversation = x.ConversationId, text = x.Text }).ToArray() };
+            if (command is { Area: "attachment", Operation: "pending" })
+                return new { status = "ok", items = await accounts.ListPendingAttachmentOperationsAsync(ct) };
+            if (command is { Area: "attachment", Operation: "operations" })
+                return new { status = "ok", items = await accounts.ListAttachmentOperationsAsync(ct) };
 
             DeepIdV2Conversation? conversation = null;
             if (command.Conversation is not null)
@@ -32,6 +36,8 @@ internal static class BusinessCommands
             if (command is { Area: "message", Operation: "list" })
                 return new { status = "ok", items = (await accounts.ListMessagesAsync(conversation!, ct)).Select(x => new
                 { text = x.Text, local = x.IsLocalAuthor, createdAt = x.CreatedAt }).ToArray() };
+            if (command is { Area: "attachment", Operation: "list" })
+                return new { status = "ok", items = await accounts.ListAttachmentsAsync(conversation!, ct) };
 
             phase = "Bootstrap";
             using var network = await NetworkBootstrap.OpenAsync(command, accounts, ct);
@@ -44,10 +50,36 @@ internal static class BusinessCommands
                 ("mailbox", "sync") => "MailboxSync",
                 ("message", "queue") => "TextQueue",
                 ("message", "send") => "TextSend",
+                ("attachment", "prepare") => "AttachmentPrepare",
+                ("attachment", "send") => "AttachmentSend",
+                ("attachment", "queue") => "AttachmentQueue",
+                ("attachment", "download") => "AttachmentDownload",
                 _ => throw new ArgumentException("Unsupported business operation.")
             };
             if (phase == "NetworkVerify")
             { await network.VerifyAndPublishAsync(ct); return new { status = "ok", networkVerified = true, contactPublished = true }; }
+            if (phase == "AttachmentPrepare")
+            {
+                AttachmentFiles.RequireNoLinks(command.File!);
+                using var input = new FileStream(command.File!, FileMode.Open, FileAccess.Read, FileShare.Read);
+                AttachmentFiles.RequireNoLinks(command.File!);
+                var prepared = await accounts.PrepareAttachmentAsync(Convert.FromHexString(command.OperationId!), input, input.Length,
+                    Path.GetFileName(command.File!), command.MediaType!, network.Source, ct);
+                return new { status = "prepared", prepared.Operation, prepared.ObjectId, prepared.Bytes, prepared.PlaintextSha256, prepared.ExpiresAtUnixSeconds };
+            }
+            if (phase == "AttachmentSend")
+            {
+                var stored = await accounts.SendAttachmentAsync(conversation!, Convert.FromHexString(command.Asset!),
+                    Convert.FromHexString(command.OperationId!), network.Source, ct);
+                return new { status = "stored", ingressDispatched = stored.IngressDispatched };
+            }
+            if (phase == "AttachmentQueue")
+            {
+                var operation = await accounts.QueueAttachmentAsync(conversation!, Convert.FromHexString(command.Asset!), network.Source, ct);
+                return new { status = "queued", operation = Convert.ToHexStringLower(operation.Span) };
+            }
+            if (phase == "AttachmentDownload")
+                return await AttachmentFiles.DownloadAsync(command, accounts, conversation!, network.Source, ct);
             if (phase == "ContactRequest")
             {
                 var result = await accounts.StartContactAsync(DeepPermanentIdV2.ParseCanonical(command.Address!),

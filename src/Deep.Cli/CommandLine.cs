@@ -11,13 +11,19 @@ internal sealed record CommandLine(string Operation, string Profile, byte[] Netw
     internal string? Conversation { get; init; }
     internal string? OperationId { get; init; }
     internal string? Text { get; init; }
+    internal string? File { get; init; }
+    internal string? MediaType { get; init; }
+    internal string? Asset { get; init; }
+    internal string? Logical { get; init; }
+    internal string? Device { get; init; }
+    internal string? Output { get; init; }
     internal static CommandLine Parse(string[] args)
     {
         if (args.Length < 2) throw new ArgumentException("Unsupported command.");
         var extra = (args[0], args[1]) switch
         {
             ("account", "create") => new[] { "--name" },
-            ("account", "status" or "address") or ("contact", "list" or "operations") or ("message", "pending") => [],
+            ("account", "status" or "address") or ("contact", "list" or "operations") or ("message", "pending") or ("attachment", "pending" or "operations") => [],
             ("network", "verify") or ("mailbox", "sync") => ["--bootstrap", "--registry"],
             ("contact", "request") => ["--bootstrap", "--registry", "--address", "--operation"],
             ("contact", "stop") => ["--bootstrap", "--registry", "--operation"],
@@ -25,6 +31,11 @@ internal sealed record CommandLine(string Operation, string Profile, byte[] Netw
             ("message", "queue") => ["--bootstrap", "--registry", "--conversation", "--text"],
             ("message", "send") => ["--bootstrap", "--registry", "--conversation", "--operation", "--text"],
             ("message", "list") => ["--conversation"],
+            ("attachment", "prepare") => ["--bootstrap", "--registry", "--file", "--media", "--operation"],
+            ("attachment", "send") => ["--bootstrap", "--registry", "--conversation", "--asset", "--operation"],
+            ("attachment", "queue") => ["--bootstrap", "--registry", "--conversation", "--asset"],
+            ("attachment", "list") => ["--conversation"],
+            ("attachment", "download") => ["--bootstrap", "--registry", "--conversation", "--logical", "--device", "--output"],
             _ => throw new ArgumentException("Unsupported command.")
         };
         var allowed = new HashSet<string>(["--profile", "--network", .. extra], StringComparer.Ordinal);
@@ -49,11 +60,19 @@ internal sealed record CommandLine(string Operation, string Profile, byte[] Netw
             (!Regex.IsMatch(operation, "\\A[0-9a-f]{64}\\z") || operation.All(c => c == '0')) ||
             options.TryGetValue("--conversation", out var conversation) && !Regex.IsMatch(conversation, "\\A[0-9A-Fa-f]{64}\\z"))
             throw new ArgumentException("Invalid operation or conversation identifier.");
+        foreach (var selector in new[] { "--asset", "--logical", "--device" })
+            if (options.TryGetValue(selector, out var id) && (!Regex.IsMatch(id, "\\A[0-9a-f]{64}\\z") || id.All(c => c == '0')))
+                throw new ArgumentException("Exact attachment selector required.");
+        foreach (var path in new[] { "--file", "--output" })
+            if (options.TryGetValue(path, out var value) && (!Path.IsPathFullyQualified(value) || value.Any(char.IsControl)))
+                throw new ArgumentException("Attachment paths must be absolute.");
         return new(args[1], profile, Convert.FromHexString(network), name)
         {
             Area = args[0], Bootstrap = options.GetValueOrDefault("--bootstrap"), Registry = options.GetValueOrDefault("--registry"),
             Address = options.GetValueOrDefault("--address"), Conversation = options.GetValueOrDefault("--conversation")?.ToUpperInvariant(),
-            OperationId = options.GetValueOrDefault("--operation"), Text = options.GetValueOrDefault("--text")
+            OperationId = options.GetValueOrDefault("--operation"), Text = options.GetValueOrDefault("--text"),
+            File = options.GetValueOrDefault("--file"), MediaType = options.GetValueOrDefault("--media"), Asset = options.GetValueOrDefault("--asset"),
+            Logical = options.GetValueOrDefault("--logical"), Device = options.GetValueOrDefault("--device"), Output = options.GetValueOrDefault("--output")
         };
     }
 }

@@ -7,6 +7,9 @@ namespace Deep.Cli;
 internal static class Program
 {
     internal static readonly TimeSpan CommandTimeout = TimeSpan.FromMinutes(5);
+    internal static readonly TimeSpan AttachmentTransferTimeout = TimeSpan.FromHours(3);
+    internal static TimeSpan TimeoutFor(string[] args) => args is ["attachment", "send" or "download", ..]
+        ? AttachmentTransferTimeout : CommandTimeout;
     private static async Task<int> Main(string[] args)
     {
         using var cancellation = new CancellationTokenSource();
@@ -14,7 +17,9 @@ internal static class Program
         // claim, grant and Store hops. Its outer host budget must not cancel a
         // healthy final Store merely because preparation took two minutes.
         // Signed windows and each transport's shorter deadlines still apply.
-        cancellation.CancelAfter(CommandTimeout);
+        // A maximum-sized attachment composes up to 200 separately bounded
+        // chunk requests. No signed window or individual hop is extended.
+        cancellation.CancelAfter(TimeoutFor(args));
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cancellation.Cancel(); };
         return await RunAsync(args, Console.Out, Console.Error, cancellation.Token);
     }
@@ -29,7 +34,7 @@ internal static class Program
             if (args is ["--help"] or [])
             {
                 await output.WriteLineAsync("deep <area> <command> --profile <alias> --network <32 lowercase hex> [options]\n" +
-                    "account create/status/address; network verify; contact request/accept/stop/list/operations; mailbox sync; message queue/send/list/pending\n" +
+                    "account create/status/address; network verify; contact request/accept/stop/list/operations; mailbox sync; message queue/send/list/pending; attachment prepare/queue/send/pending/operations/list/download\n" +
                     "Network operations require --bootstrap <public dev bundle> --registry <canonical HTTPS origin>.\n" +
                     "request: --address --operation; accept: --conversation --operation; queue: --conversation --text; send: --conversation --operation --text.\n" +
                     "Windows host; isolated persistent DID2 profiles. Stored is not remote delivery.");

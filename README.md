@@ -62,6 +62,43 @@ Alongside `--profile` and `--network`, commands accept:
 | `message send` | network options, `--conversation`, `--operation`, `--text` |
 | `message list` | `--conversation`; explicitly returns message history |
 | `message pending` | none; returns existing exact pending text commands |
+| `attachment prepare` | network options, absolute `--file`, `--media`, stable asset `--operation` |
+| `attachment queue` | network options, `--conversation`, `--asset` |
+| `attachment send` | network options, `--conversation`, `--asset`, original offer `--operation` |
+| `attachment pending`, `attachment operations` | none; protected operation projections, never capabilities/keys |
+| `attachment list` | `--conversation`; key-free authenticated offer projection |
+| `attachment download` | network options, `--conversation`, `--logical`, `--device`, absolute `--output` |
+
+An asset operation and an offer operation are **different**. `prepare` adopts
+the encrypted source durably; repeating identical input/metadata retains the
+original object, key, chunks and expiry. `queue` creates one offer in Shared's
+ordinary outbox and returns its owner-generated operation. `send` selects only
+that original operation and the matching asset; it cannot create a message.
+`operations` includes retained working Stored/stopped rows; compaction can retire
+them. Its flags are not receipts or permission to recreate missing work.
+
+Uploads use two current signed Blob nodes through the existing three-hop ONION
+carrier. The manifest/key/name/media stay in E2EE, not in the blob descriptor.
+Downloads reselect the manifest from authenticated native receive history, check
+all ciphertext commitments and AEAD tags, and only then write verified plaintext
+to a private staging file. A successful atomic move never overwrites an existing
+destination and never uses the remote filename as an output path.
+
+Attachment send/download have a bounded **3-hour composite command budget** for
+up to100 chunks/two upload copies. Every proof, original expiry, currentness check
+and shorter transport deadline remains independently enforced; other commands
+keep5 minutes. Ctrl+C preserves original adopted/queued work. Partial download
+staging is removed; a cold retry currently rechecks/refetches chunks, not a durable
+local download-progress cache. Large-file throughput/retention/churn are not
+qualified by the small fixture run.
+
+`eng/Invoke-AttachmentE2E.ps1` uses two already accepted isolated profiles, a
+generated three-chunk document and a valid PNG in the reverse direction. It
+checks independent full-output hashes, cold exact retries, duplicate polls and
+overwrite refusal. It reuses retained operations and refuses to replace a
+completed offer whose original selector is no longer available. Receipts contain
+hashes/counts/closed phases only, not message IDs, manifests or source paths.
+See [attachment evidence](docs/testing/cli-attachments-2026-10-18.md).
 
 Logical operation IDs are nonzero **32 bytes /64 lowercase hex**; conversation
 IDs are32 bytes /64 hex. `queue` durably authors one message and returns its
