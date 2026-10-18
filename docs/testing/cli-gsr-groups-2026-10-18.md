@@ -1,10 +1,46 @@
-# Three-CLI GSR1 candidate
+# Three-CLI GSR1 functional checkpoint
 
-Owner: Mr. X. Updated: 2026-10-19. Functional qualification is pending the connected
-receipt below; this is not release, device or long-offline acceptance.
+Owner: Mr. X. Updated: 2026-10-19. The current three-member functional cycle
+passed through retained-state recovery in17–20. This is not first-attempt
+reliability, release, device, scale or long-offline acceptance.
 
 Normative allocation: [DR-0145](../../../docs/survival-program/decisions/DR-0145-owned-group-control-rendezvous.md).
 Custody/consumer mapping: [Shared](../../../deep-client-shared/docs/architecture/owned-connected-groups.md).
+
+## Accepted current result
+
+`e2e-20`: PASS/native0,51 cold CLI processes,0 failed steps. It continues the
+same current-runtime group/profiles from17–19, not a replacement group or repaired
+native state. The connected chain covers all three mutually consented pairs,
+create/invite/accept, sequential activation to3 members/epoch2, empty ordinary
+mailboxes and independent GSR catch-up on both recipients. All protected heads
+match. One semantic message from each participant reaches both peers; every cold
+native history contains exactly3 messages,1 local, with exact expected texts.
+All three original full Store batches replay, all mailboxes remain empty and
+histories deduplicate. Cold owner GSR receipt re-verification passes; both
+recipient control cursors return0 events. No new send replaces an unknown one.
+
+Runtime SHA256: `f788081a65a27ca8116f08b9b8388f7fd519873f115521d272d1fb34f8d5e8b7`.
+Scenario SHA256: `eee94d8c07b91e0b45e26c6d63ad8f6d7575a6d8c2cb0f90f36b3bcbae262783`.
+Accepted receipt SHA256: `1679947bef1f87ed46e4221ab0ac34178456257f2df2502a4c2e30e3b894bf14`.
+Every run's original receipt/scenario/runtime archive remains under its ignored
+`artifacts/cli-gsr-20261018/e2e-N/` directory. Earlier failures are not overwritten.
+
+Latest focused source evidence: CLI unit09:49; Shared native06:12 and
+store-fence01:2; Protocol focused05:29, forwarding03:35, registry04 and graph05;
+Node control-pagination03:14 and forwarding09:25; Registry scope02:6 actual
+pure/provider/HTTPS cases; DevOps contracts02:30. All PASS/native0, not full gates.
+The final node candidate is supported build11/up10/imagea81582f, retaining
+existing node keys/volumes and1-CPU quotas. Registry retains the documented2-CPU
+local budget and imagefbc3ed4. Windows/Android and production were not changed.
+
+Performance improvements are real but not an end-to-end latency qualification:
+CLI native-protection cost is now milliseconds per read rather than re-opening
+the entire DPAPI aggregate, and node reads no longer parse the same operation
+snapshot twice. Nevertheless, original first two group fanouts took227858/
+227826ms and retained third fanout recovery114369ms. Repeated directory/network
+verification remains costly. First-attempt reliability, performance/SLO, expired
+unknown operations and the scope exclusions below stay open.
 
 ## Current implementation
 
@@ -246,6 +282,47 @@ budget is now rendered by Compose (DevOps contracts02:30 PASS/native0). Memory,
 transport/signature windows, TLS and node quotas remain unchanged; no SLO claim.
 `e2e-17` reuses the actual mutually consented first pair and creates only a
 separate third QA account, not a repair/replacement of the old poisoned request.
+
+`e2e-17` ended FAIL after35 cold commands: all three mutual contact
+pairs, group creation and original invitation Store passed. The invitee's
+retained-read response failed `IssuedAfterCurrentUpper`; no time predicate was
+relaxed and the original profiles/group/invitation remain preserved. `e2e-18`
+continues exactly those three accounts and the same group with published-account
+reuse, not new identities or a new semantic invitation. That response now
+verifies; the first invitation ACK hit the node native deadline, then its exact
+cold retry passed. Consent, owner ACK and GSR successor publication passed on
+the first attempt. The recipient's ordinary mailbox was empty, independent GSR
+catch-up passed, and both protected heads matched. Third-member addition and
+three-way messages/cold replay were still pending; this was not a full GSR PASS.
+
+`e2e-18` ended FAIL/native1 after28 cold commands. The first member's GSR
+catch-up and matching protected heads passed. Original third invitation Store
+passed first attempt357158ms;6390 native unprotects cost3836ms, while42 directory
+and20 network-closure calls cost108406/75585ms and8 ONION calls104352ms. Its
+original receive/ACK timed out twice (134199/111728ms). Node diagnostics recorded
+300/328 live lease checks and repeated whole operation-document work within the
+unchanged25s terminal budget. No new group, reminted ACK or erased state follows.
+
+Node `forwarding-09`25 PASS/native0/0skip (zero compiler diagnostics) covers
+single-read parse reuse with post-callback re-read/hash/native commitment checks,
+including equal-length snapshot tampering and existing native crash/ACK/HTTP
+regressions. Build11/up10 deployed imagea81582f to all three existing nodes;
+keys/volumes/CPU quotas remain unchanged and all9 services are healthy.
+`e2e-19` ended FAIL/native1 after41 cold commands/3 failed steps. The same
+third-member ACK recovered first attempt103622ms (ONION15344ms). Consent,
+owner ACK and3-member successor publication passed; both recipients fetched
+GSR independently and all three exact heads matched. Two empty-mailbox polls
+needed exact retries. First two fanouts and their four receive/ACKs passed
+first attempt; the third send returned unknown after a node current-network
+cryptographic rejection. Its protected semantic command/original batch remains.
+Receipt SHA256: `60aa8e346230872c11d664a3e157c6d08d67a8a9b0e88daed207ed645b79b830`.
+
+`e2e-20` then passed51 cold commands/native0/0 failed steps on the same
+runtime09, accounts, group and original semantic commands. Original third-batch
+flush recovered first attempt114369ms with no new send. All messages/native
+histories/full Store replays/empty mailboxes and cold GSR receipt/cursor checks
+passed as detailed above. This is a retained-state recovery PASS, not a clean
+first-attempt run or recovery of the older deliberately preserved blocked cases.
 
 Shared `native-06`12 PASS/native0/0skip covers the current native-owner reuse,
 real native group custody, endpoint phase freshness and actual publication /
