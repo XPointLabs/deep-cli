@@ -224,6 +224,29 @@ wrapped-key splicing/fresh keys, hostile/truncated lengths, raw-format rejection
 and two actual account cold reopens. `e2e-16` starts the independent candidate
 on unchanged node-build10/up09 and existing network/node custody.
 
+`e2e-16` ended FAIL31. All3 accounts published first attempt, the first pair
+completed and the second request/receive ACK passed; the second acceptance's
+private grant failed twice. Registry independently located a poisoned permanent
+reservation: a valid release rejection on a changed view was followed by
+RequireScope conflict because the scope included the transient DNH2 checkpoint.
+[DR-0149](../../../docs/survival-program/decisions/DR-0149-stable-mailbox-grant-intent-scope.md)
+separates exact verified intent from fresh authorization. The v2 private hash
+has no checkpoint/policy-snapshot parameters; original request/evidence kind,
+route/role and horizons remain bound. All existing current root/policy/replica/
+forwarding/signing/release checks and permanent conflict/winner guards remain.
+Registry scope01 passed2 pure cases; scope02 passed6 (2 pure,2 actual PostgreSQL
+journal cases,2 actual current/retained HTTPS/Protocol/role-signer/native-mailbox
+cases), native0/0skip. Old incompatible reservations are preserved/unavailable,
+not converted, deleted, reminted or represented as recovered.
+
+Registry build01/up01 uses imagefbc3ed4 and the original keys/DB/node volumes.
+All9 services healthy. The local Registry quota was live-tuned1→2 CPUs without
+restart during16 after128 of377 scheduler periods were throttled; the same2-CPU
+budget is now rendered by Compose (DevOps contracts02:30 PASS/native0). Memory,
+transport/signature windows, TLS and node quotas remain unchanged; no SLO claim.
+`e2e-17` reuses the actual mutually consented first pair and creates only a
+separate third QA account, not a repair/replacement of the old poisoned request.
+
 Shared `native-06`12 PASS/native0/0skip covers the current native-owner reuse,
 real native group custody, endpoint phase freshness and actual publication /
 retained semantic fault / lost ACK / empty-poll paths. Node `forwarding-08`
