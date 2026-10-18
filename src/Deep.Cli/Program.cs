@@ -12,7 +12,7 @@ internal static class Program
     internal static TimeSpan TimeoutFor(string[] args) => args switch
     {
         ["attachment", "send" or "download", ..] => AttachmentTransferTimeout,
-        ["group", "invite" or "accept" or "advance" or "send" or "flush", ..] => GroupBatchTimeout,
+        ["group", "invite" or "accept" or "advance" or "send" or "flush" or "sync" or "publish", ..] => GroupBatchTimeout,
         _ => CommandTimeout
     };
     private static async Task<int> Main(string[] args)

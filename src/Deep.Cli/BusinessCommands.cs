@@ -59,7 +59,7 @@ internal static class BusinessCommands
                 ("attachment", "send") => "AttachmentSend",
                 ("attachment", "queue") => "AttachmentQueue",
                 ("attachment", "download") => "AttachmentDownload",
-                ("group", "create" or "invite" or "accept" or "advance" or "send" or "flush") => "GroupWork",
+                ("group", "create" or "invite" or "accept" or "advance" or "send" or "flush" or "sync" or "publish") => "GroupWork",
                 _ => throw new ArgumentException("Unsupported business operation.")
             };
             if (phase == "NetworkVerify")
@@ -76,9 +76,11 @@ internal static class BusinessCommands
                     "advance" => await accounts.AdvanceGroupAsync(group, conversation!, network.Source, ct),
                     "send" => await accounts.SendGroupTextAsync(group, conversation!, command.Text!, network.Source, ct),
                     "flush" => await accounts.FlushGroupAsync(group, conversation!, network.Source, ct),
+                    "publish" => await accounts.PublishGroupControlAsync(group, network.Source, ct),
+                    "sync" => await accounts.SyncGroupControlAsync(group, conversation!, network.Source, ct),
                     _ => throw new ArgumentException("Unsupported group operation.")
                 };
-                return new { status = "stored", completed };
+                return new { status = command.Operation == "sync" ? "synced" : "stored", completed };
             }
             if (phase == "AttachmentPrepare")
             {
@@ -160,6 +162,9 @@ internal sealed class CliBusinessException(string phase, Exception error) : Exce
                 _ => "Other"
             };
             var check = "Unclassified";
+            if (current is ClientMailboxDispatchOutcomeUnknownException && current.Data["Deep.GroupControl.Status"] is string groupStatus &&
+                new[] { "Expired", "RateLimited", "StaleView", "Conflict", "OutcomeUnknown", "SizeFailure", "RecordTooLarge" }.Contains(groupStatus, StringComparer.Ordinal))
+                check = "GroupControl" + groupStatus;
             var exceptionType = current.GetType();
             if (current is CryptographicException && exceptionType.Assembly == typeof(CryptographicException).Assembly)
                 check = current.Message switch

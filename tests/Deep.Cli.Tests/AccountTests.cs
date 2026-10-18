@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text.Json;
 using Deep.Protocol.Identity;
@@ -42,7 +43,7 @@ public sealed class AccountTests
         var encrypted = protector.Protect(clear);
         Assert.Equal(clear, protector.Unprotect(encrypted));
         encrypted[^1] ^= 1;
-        Assert.Throws<CryptographicException>(() => protector.Unprotect(encrypted));
+        Assert.Throws<AuthenticationTagMismatchException>(() => protector.Unprotect(encrypted));
         Assert.Throws<ArgumentException>(() => protector.Protect([]));
     }
 
@@ -59,11 +60,65 @@ public sealed class AccountTests
         Assert.Equal(clear, reader.Unprotect(encrypted));
         Assert.Equal(3, reader.NativeUnprotects);
         var tampered = encrypted.ToArray(); tampered[^1] ^= 1;
-        Assert.Throws<CryptographicException>(() => reader.Unprotect(tampered));
+        Assert.Throws<AuthenticationTagMismatchException>(() => reader.Unprotect(tampered));
         Assert.Equal(4, reader.NativeUnprotects);
         Assert.Equal(clear, reader.Unprotect(encrypted));
         reader.Dispose();
         Assert.Throws<ObjectDisposedException>(() => reader.Unprotect(encrypted));
+    }
+
+    [Fact]
+    public void WrappedEnvelopeRejectsEveryTamperedRegionMalformedBoundsAndRetiredRawDpapi()
+    {
+        using var protector = new WindowsProfile.CurrentUserProtector();
+        var clear = RandomNumberGenerator.GetBytes(801_334);
+        var encrypted = protector.Protect(clear);
+        Assert.Equal(clear, protector.Unprotect(encrypted));
+        var markerBytes = "DeepCli/DPAPI-AESGCM/v1\0"u8.Length;
+        var wrappedBytes = checked((int)BinaryPrimitives.ReadUInt32BigEndian(encrypted.AsSpan(markerBytes)));
+        var prefix = markerBytes + 4 + wrappedBytes + 12;
+        foreach (var position in new[] { 0, markerBytes, markerBytes + 4, prefix - 1, prefix, prefix + 16, encrypted.Length - 1 })
+        {
+            var changed = encrypted.ToArray(); changed[position] ^= 1;
+            Assert.ThrowsAny<CryptographicException>(() => protector.Unprotect(changed));
+        }
+        Assert.Throws<CryptographicException>(() => protector.Unprotect(encrypted[..(prefix + 16)]));
+        Assert.Throws<CryptographicException>(() => protector.Unprotect([]));
+        var overflow = encrypted.ToArray(); BinaryPrimitives.WriteUInt32BigEndian(overflow.AsSpan(markerBytes), uint.MaxValue);
+        Assert.Throws<CryptographicException>(() => protector.Unprotect(overflow));
+        var raw = ProtectedData.Protect(clear, "Deep/Cli/Store/V2/Windows-DPAPI"u8.ToArray(), DataProtectionScope.CurrentUser);
+        Assert.Throws<CryptographicException>(() => protector.Unprotect(raw));
+        var independent = protector.Protect(clear);
+        Assert.NotEqual(encrypted, independent);
+        Assert.Equal(clear, protector.Unprotect(independent));
+        var entropy = "Deep/Cli/Store/V2/Windows-DPAPI"u8.ToArray();
+        var firstKey = ProtectedData.Unprotect(encrypted.AsSpan(markerBytes + 4, wrappedBytes).ToArray(), entropy, DataProtectionScope.CurrentUser);
+        var nextLength = checked((int)BinaryPrimitives.ReadUInt32BigEndian(independent.AsSpan(markerBytes)));
+        var nextKey = ProtectedData.Unprotect(independent.AsSpan(markerBytes + 4, nextLength).ToArray(), entropy, DataProtectionScope.CurrentUser);
+        try { Assert.Equal(32, firstKey.Length); Assert.Equal(32, nextKey.Length); Assert.NotEqual(firstKey, nextKey); }
+        finally { CryptographicOperations.ZeroMemory(firstKey); CryptographicOperations.ZeroMemory(nextKey); }
+        var spliced = encrypted.ToArray(); independent.AsSpan(markerBytes + 4, wrappedBytes).CopyTo(spliced.AsSpan(markerBytes + 4));
+        Assert.ThrowsAny<CryptographicException>(() => protector.Unprotect(spliced));
+        CryptographicOperations.ZeroMemory(clear);
+    }
+
+    [Fact]
+    public void LargeEnvelopeStillUnwrapsTheNativeKeyOnEveryReadWithoutCaching()
+    {
+        using var protector = new WindowsProfile.CurrentUserProtector();
+        var clear = RandomNumberGenerator.GetBytes(801_334);
+        try
+        {
+            var encrypted = protector.Protect(clear);
+            for (var i = 0; i < 32; i++)
+            {
+                var opened = protector.Unprotect(encrypted);
+                try { Assert.True(CryptographicOperations.FixedTimeEquals(clear, opened)); }
+                finally { CryptographicOperations.ZeroMemory(opened); }
+            }
+            Assert.Equal(32, protector.NativeUnprotects);
+        }
+        finally { CryptographicOperations.ZeroMemory(clear); }
     }
 
     [Fact]

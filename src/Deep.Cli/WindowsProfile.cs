@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
@@ -61,11 +62,15 @@ internal sealed class WindowsProfile : IDisposable
 
     public void Dispose() { try { storage.Dispose(); } finally { protector.Dispose(); commandLease.Dispose(); } }
 
-    // Platform envelope only: raw DPAPI output, no new Deep wire/record grammar,
-    // no application-owned key file and no device namespace compatibility reader.
+    // Platform envelope only, not a Deep wire record. DPAPI protects a fresh
+    // per-write key, AES-GCM authenticates the entire aggregate on EVERY read.
+    // No retained plaintext/key, separate key file or retired raw-DPAPI reader.
     internal sealed class CurrentUserProtector : IDeepSecretProtector, IDisposable
     {
         private static readonly byte[] Entropy = "Deep/Cli/Store/V2/Windows-DPAPI"u8.ToArray();
+        private static ReadOnlySpan<byte> Marker => "DeepCli/DPAPI-AESGCM/v1\0"u8;
+        private const int MaximumPlaintextBytes = 8 * 1024 * 1024, MaximumWrappedKeyBytes = 2048;
+        private const int NonceBytes = 12, TagBytes = 16, KeyBytes = 32;
         private readonly object gate = new();
         private bool disposed;
         internal long NativeUnprotects { get; private set; }
@@ -74,14 +79,26 @@ internal sealed class WindowsProfile : IDisposable
             lock (gate)
             {
                 ObjectDisposedException.ThrowIf(disposed, this);
-                if (plaintext.IsEmpty) throw new ArgumentException("Empty secret rejected.");
-                var copy = plaintext.ToArray();
+                if (plaintext.IsEmpty || plaintext.Length > MaximumPlaintextBytes) throw new ArgumentException("Secret size rejected.");
+                var key = RandomNumberGenerator.GetBytes(KeyBytes);
+                byte[] wrapped = [];
                 var started = System.Diagnostics.Stopwatch.GetTimestamp();
                 try
                 {
-                    return ProtectedData.Protect(copy, Entropy, DataProtectionScope.CurrentUser);
+                    wrapped = ProtectedData.Protect(key, Entropy, DataProtectionScope.CurrentUser);
+                    if (wrapped.Length is < 1 or > MaximumWrappedKeyBytes) throw new CryptographicException("Wrapped key size rejected.");
+                    var prefix = checked(Marker.Length + 4 + wrapped.Length + NonceBytes);
+                    var result = new byte[checked(prefix + TagBytes + plaintext.Length)];
+                    Marker.CopyTo(result);
+                    BinaryPrimitives.WriteUInt32BigEndian(result.AsSpan(Marker.Length), checked((uint)wrapped.Length));
+                    wrapped.CopyTo(result, Marker.Length + 4);
+                    var nonce = result.AsSpan(prefix - NonceBytes, NonceBytes);
+                    RandomNumberGenerator.Fill(nonce);
+                    using var aes = new AesGcm(key, TagBytes);
+                    aes.Encrypt(nonce, plaintext, result.AsSpan(prefix + TagBytes), result.AsSpan(prefix, TagBytes), result.AsSpan(0, prefix));
+                    return result;
                 }
-                finally { CryptographicOperations.ZeroMemory(copy); ProtectionWork.Record(true, started); }
+                finally { CryptographicOperations.ZeroMemory(key); CryptographicOperations.ZeroMemory(wrapped); ProtectionWork.Record(true, started); }
             }
         }
         public byte[] Unprotect(ReadOnlySpan<byte> protectedBytes)
@@ -89,14 +106,34 @@ internal sealed class WindowsProfile : IDisposable
             lock (gate)
             {
                 ObjectDisposedException.ThrowIf(disposed, this);
-                var copy = protectedBytes.ToArray();
+                if (protectedBytes.Length < Marker.Length + 4 + 1 + NonceBytes + TagBytes + 1 ||
+                    protectedBytes.Length > MaximumPlaintextBytes + MaximumWrappedKeyBytes + Marker.Length + 4 + NonceBytes + TagBytes ||
+                    !protectedBytes.StartsWith(Marker))
+                    throw new CryptographicException("Unsupported CLI protection envelope; use a new isolated profile.");
+                var length = BinaryPrimitives.ReadUInt32BigEndian(protectedBytes[Marker.Length..]);
+                if (length is < 1 or > MaximumWrappedKeyBytes) throw new CryptographicException("Wrapped key size rejected.");
+                var prefix = checked(Marker.Length + 4 + (int)length + NonceBytes);
+                var clearLength = protectedBytes.Length - prefix - TagBytes;
+                if (clearLength is < 1 or > MaximumPlaintextBytes) throw new CryptographicException("Protected aggregate size rejected.");
+                var wrapped = protectedBytes.Slice(Marker.Length + 4, (int)length).ToArray();
+                byte[] key = [], plaintext = [];
                 var started = System.Diagnostics.Stopwatch.GetTimestamp();
                 try
                 {
                     NativeUnprotects++;
-                    return ProtectedData.Unprotect(copy, Entropy, DataProtectionScope.CurrentUser);
+                    key = ProtectedData.Unprotect(wrapped, Entropy, DataProtectionScope.CurrentUser);
+                    if (key.Length != KeyBytes) throw new CryptographicException("Unwrapped key size rejected.");
+                    plaintext = new byte[clearLength];
+                    using var aes = new AesGcm(key, TagBytes);
+                    aes.Decrypt(protectedBytes.Slice(prefix - NonceBytes, NonceBytes), protectedBytes[(prefix + TagBytes)..],
+                        protectedBytes.Slice(prefix, TagBytes), plaintext, protectedBytes[..prefix]);
+                    var owned = plaintext; plaintext = []; return owned;
                 }
-                finally { CryptographicOperations.ZeroMemory(copy); ProtectionWork.Record(false, started); }
+                finally
+                {
+                    CryptographicOperations.ZeroMemory(key); CryptographicOperations.ZeroMemory(wrapped);
+                    CryptographicOperations.ZeroMemory(plaintext); ProtectionWork.Record(false, started);
+                }
             }
         }
         public void Dispose()

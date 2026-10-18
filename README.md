@@ -30,38 +30,54 @@ recovery export, arbitrary storage-path or raw-RPC command.
 
 Profiles live only in the current user's local application-data directory under
 `XPointLabs/DeepCli/<network>/<profile>`. Each has a private Windows ACL, current-user
-DPAPI aggregate protection and the same Shared SQLCipher/account owner. Commands
+DPAPI-wrapped per-write AES-256-GCM aggregate protection and the same Shared SQLCipher/account owner. Commands
 hold an exclusive per-profile lease; no MAUI, Android or production state is opened.
 Keep QA profiles for restart/recovery testing instead of resetting after failures.
 
-Every aggregate decryption uses native DPAPI; no plaintext decryption cache is
-retained by the adapter. Numeric `protectionWork` reports native call counts/time
+Every aggregate decryption unwraps its32-byte key with native current-user DPAPI,
+authenticates the complete ciphertext/header with a128-bit GCM tag, and zeroes
+the key immediately. Every write uses a new random key and96-bit nonce. No
+plaintext/key decryption cache or separate key file is retained. Native DPAPI no
+longer processes the full growing inventory on each slot read. This is a local
+CLI platform-envelope clean break, not a network/Shared format change: older
+raw-DPAPI profiles reject without reader/migration. Preserve them as old evidence
+and use new isolated QA profiles; device/prod profiles are never opened.
+The .NET primitives are [AesGcm](https://learn.microsoft.com/en-us/dotnet/api/system.security.cryptography.aesgcm.encrypt?view=net-10.0)
+and [current-user ProtectedData](https://learn.microsoft.com/en-us/dotnet/api/system.security.cryptography.protecteddata?view=windowsdesktop-10.0).
+Numeric `protectionWork` reports call counts/complete protection time
 only. `networkWork` groups public HTTP by a closed endpoint category;
 it contains counts/status totals/durations, never URLs, bodies or identifiers.
 
 ## Real network and business commands
 
-The DR-0144 multi-account group candidate requires newly created isolated CLI profiles:
+The DR-0145 GSR1 multi-account group candidate requires newly created isolated CLI profiles:
 application SQL schema17, ordinary journal9 and mandatory protected group
-generation2 registration. Older profiles reject without migration; keep them and their
+generation3 registration. Older profiles reject without migration; keep them and their
 earlier receipts, do not reset device/production accounts.
 
 Group commands use the same network options and Shared owner:
 `group create --name`, `group list`, `group messages --group`, and
-`group invite/accept/advance/send/flush --group --conversation` (`send` also
+`group invite/accept/advance/send/flush/sync --group --conversation`
+and `group publish --group` (`send` also
 requires `--text`). The candidate supports multiple accounts/one current device each; three-account
 correctness is tested separately from the final scale/device gates.
 After the invitee's explicit acceptance has been received, the owner runs
-`advance` to retain and send the membership commit through ordinary mailboxes;
-acceptance alone is not membership. This candidate does not implement GSR1
-publish-complete or long-offline recovery, even when every mailbox Store passes.
+`advance` to retain the membership commit and publish sealed control chunks to
+both descriptor-anchored GSR1 replicas under current network authority.
+Routine operational view/selection-epoch renewal does not move a control stream. Acceptance alone is not membership. The invite and
+initial descriptor/key travel inside pairwise E2EE; subsequent commits are
+obtained with `sync` independently of ordinary mailbox retention. `publish`
+resumes original pending control writes; it never recreates uncertain writes.
+Gaps, expiry, conflicts or missing authenticated receipts fail closed. Descriptor
+rotation/handover, expired unknown-write reconciliation and long-offline recovery
+are not qualified.
 `send` creates a new logical group message; after any uncertain result use
 `flush`, never repeat `send` to retry. The selected conversation identifies an existing session, not a recipient-only
 send: Shared derives the complete current membership and requires an accepted
 session for every remote target before saving one batch. Flush drains all targets
 of the original protected batch
 with its original operations/sequences and independently verified Store results.
-`stored` is not remote delivery. `eng/Invoke-ThreeClientGroupE2E.ps1` verifies three independent CLI
+`stored` is not remote delivery. `eng/Invoke-ThreeClientGsrE2E.ps1` verifies three independent CLI
 profiles, sequential membership additions, full two-target fanout and cold/dedup
 history. `eng/Invoke-GroupE2E.ps1` retains the two-profile scenario and verifies both CLI
 histories and durable ACKs through the real local network; it is not GSR1
@@ -79,7 +95,8 @@ PowerShell5.1; native source-test wrappers still select5.1 as the workspace requ
 After a completed cycle, `-GroupRevision 1` explicitly starts a separate named
 QA group without deleting the old group/history; never advance it to evade
 unknown work. Retry the same revision and its original `flush` operations.
-Detailed evidence and remaining limits: [three-CLI checkpoint](docs/testing/cli-three-groups-2026-10-18.md)
+Current GSR1 evidence and remaining limits: [GSR checkpoint](docs/testing/cli-gsr-groups-2026-10-18.md).
+Historical ordinary-mailbox generation2 evidence: [three-CLI checkpoint](docs/testing/cli-three-groups-2026-10-18.md)
 and the earlier [two-CLI checkpoint](docs/testing/cli-groups-2026-10-18.md).
 
 The initial network adapter consumes the existing **public** `deep-dev-current`

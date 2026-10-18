@@ -40,7 +40,8 @@ internal sealed record CommandLine(string Operation, string Profile, byte[] Netw
             ("group", "create") => ["--bootstrap", "--registry", "--name"],
             ("group", "list") => [],
             ("group", "messages") => ["--group"],
-            ("group", "invite" or "accept" or "advance" or "flush") => ["--bootstrap", "--registry", "--conversation", "--group"],
+            ("group", "invite" or "accept" or "advance" or "flush" or "sync") => ["--bootstrap", "--registry", "--conversation", "--group"],
+            ("group", "publish") => ["--bootstrap", "--registry", "--group"],
             ("group", "send") => ["--bootstrap", "--registry", "--conversation", "--group", "--text"],
             _ => throw new ArgumentException("Unsupported command.")
         };
