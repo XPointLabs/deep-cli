@@ -4,6 +4,15 @@ Owner: Mr. X. Date: 2026-10-19. Local Docker / CLI only. Windows, Android and
 production remain untouched. Baseline:
 [previous performance checkpoint](cli-gsr-performance-2026-10-19.md).
 
+The thirteenth strict candidate also **failed**:48 commands,1389.217 summed
+CLI seconds, final third-member acceptance rejected at native `VerifyDtt`.
+This is not a timeout or a ratchet performance result; exact DTT/view/policy
+coherence rejected before successful completion. Its original consent batch
+and all profiles were retained. Subsequent working-session recovery/latency
+evidence is tracked separately in
+[the session checkpoint](cli-working-session-2026-10-19.md); it cannot erase
+this first-attempt failure or qualify release/device E2E.
+
 ## Why ratchet replacement is not the current fix
 
 The [comparison owner](../../../docs/architecture/SESSION-PARITY-AND-SOURCES.md)

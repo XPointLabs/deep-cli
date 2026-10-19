@@ -24,37 +24,45 @@ internal static class Program
         // Signed windows and each transport's shorter deadlines still apply.
         // A maximum-sized attachment composes up to 200 separately bounded
         // chunk requests. No signed window or individual hop is extended.
-        cancellation.CancelAfter(TimeoutFor(args));
+        if (args is not ["session", "run", ..]) cancellation.CancelAfter(TimeoutFor(args));
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cancellation.Cancel(); };
         return await RunAsync(args, Console.Out, Console.Error, cancellation.Token);
     }
 
     internal static async Task<int> RunAsync(string[] args, TextWriter output, TextWriter error,
-        CancellationToken ct = default)
+        CancellationToken ct = default, CliSession? session = null)
     {
         using var work = ProtectionWork.Begin();
         using var networkWork = new NetworkWork();
         try
         {
-            if (args is ["--help"] or [])
+            if (session is null && args is (["--help"] or []))
             {
                 await output.WriteLineAsync("deep <area> <command> --profile <alias> --network <32 lowercase hex> [options]\n" +
-                    "account create/status/address; network verify; contact request/accept/stop/list/operations; mailbox sync; message queue/send/list/pending; attachment prepare/queue/send/pending/operations/list/download; group create/invite/accept/advance/send/flush/list/messages\n" +
+                    "account create/status/address; network verify/refresh; contact request/accept/stop/list/operations; mailbox sync; message queue/send/list/pending; attachment prepare/queue/send/pending/operations/list/download; group create/invite/accept/advance/send/flush/list/messages\n" +
                     "Network operations require --bootstrap <public dev bundle> --registry <canonical HTTPS origin>.\n" +
                     "request: --address --operation; accept: --conversation --operation; queue: --conversation --text; send: --conversation --operation --text.\n" +
+                    "session run: bounded JSON argument arrays on stdin; one bound profile/network/bootstrap/origin, serial commands until EOF.\n" +
                     "Windows host; isolated persistent DID2 profiles. Stored is not remote delivery.");
                 return 0;
             }
             var command = CommandLine.Parse(args);
             ct.ThrowIfCancellationRequested();
-            using var profile = WindowsProfile.Open(command);
+            if (command.Area == "session")
+            {
+                if (session is not null) throw new ArgumentException("Nested session rejected.");
+                return await CliSession.RunAsync(command, Console.In, output, ct);
+            }
+            using var ownedProfile = session is null ? WindowsProfile.Open(command) : null;
+            var profile = session?.GetProfile(command) ?? ownedProfile!;
             if (command.Area != "account")
             {
                 if (await profile.Accounts.GetCurrentAsync(ct) is null) return await FailAsync(error, "account-missing", 4);
-                var result = await BusinessCommands.RunAsync(command, profile.Accounts, ct);
+                var result = await BusinessCommands.RunAsync(command, profile.Accounts, ct, session);
                 var encoded = JsonSerializer.SerializeToNode(result)!.AsObject();
                 encoded["protectionWork"] = JsonSerializer.SerializeToNode(work.Snapshot());
                 encoded["networkWork"] = JsonSerializer.SerializeToNode(networkWork.Snapshot());
+                if (session is not null) encoded["sessionWork"] = JsonSerializer.SerializeToNode(session.Snapshot());
                 await output.WriteLineAsync(encoded.ToJsonString());
                 return 0;
             }

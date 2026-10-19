@@ -9,7 +9,8 @@ namespace Deep.Cli;
 
 internal static class BusinessCommands
 {
-    internal static async Task<object> RunAsync(CommandLine command, DeepIdV2AccountService accounts, CancellationToken ct)
+    internal static async Task<object> RunAsync(CommandLine command, DeepIdV2AccountService accounts, CancellationToken ct,
+        CliSession? session = null)
     {
         var phase = "LocalRead";
         try
@@ -45,10 +46,12 @@ internal static class BusinessCommands
                 return new { status = "ok", items = await accounts.ListAttachmentsAsync(conversation!, ct) };
 
             phase = "Bootstrap";
-            using var network = await NetworkBootstrap.OpenAsync(command, accounts, ct);
+            using var ownedNetwork = session is null ? await NetworkBootstrap.OpenAsync(command, accounts, ct) : null;
+            var network = session is null ? ownedNetwork! : await session.GetNetworkAsync(command, ct);
             phase = (command.Area, command.Operation) switch
             {
                 ("network", "verify") => "NetworkVerify",
+                ("network", "refresh") => "NetworkRefresh",
                 ("contact", "request") => "ContactRequest",
                 ("contact", "stop") => "ContactStop",
                 ("contact", "accept") => "ContactAccept",
@@ -64,20 +67,25 @@ internal static class BusinessCommands
             };
             if (phase == "NetworkVerify")
             { await network.VerifyAndPublishAsync(ct); return new { status = "ok", networkVerified = true, contactPublished = true }; }
+            if (phase == "NetworkRefresh")
+            { await network.RefreshGroupAuthorityAsync(ct); return new { status = "ok", groupAuthorityRefreshed = true }; }
             if (phase == "GroupWork")
             {
+                // Only established group work shares the public session memo.
+                // Initial/contact and mailbox receive/fresh ACK keep Source.
+                var source = session is null ? network.Source : network.EstablishedGroupSource;
                 if (command.Operation == "create")
-                    return new { status = "created", group = await accounts.CreateGroupAsync(command.Name!, network.Source, ct) };
+                    return new { status = "created", group = await accounts.CreateGroupAsync(command.Name!, source, ct) };
                 var group = Convert.FromHexString(command.Group!);
                 var completed = command.Operation switch
                 {
-                    "invite" => await accounts.InviteToGroupAsync(group, conversation!, network.Source, ct),
-                    "accept" => await accounts.AcceptGroupAsync(group, conversation!, network.Source, ct),
-                    "advance" => await accounts.AdvanceGroupAsync(group, conversation!, network.Source, ct),
-                    "send" => await accounts.SendGroupTextAsync(group, conversation!, command.Text!, network.Source, ct),
-                    "flush" => await accounts.FlushGroupAsync(group, conversation!, network.Source, ct),
-                    "publish" => await accounts.PublishGroupControlAsync(group, network.Source, ct),
-                    "sync" => await accounts.SyncGroupControlAsync(group, conversation!, network.Source, ct),
+                    "invite" => await accounts.InviteToGroupAsync(group, conversation!, source, ct),
+                    "accept" => await accounts.AcceptGroupAsync(group, conversation!, source, ct),
+                    "advance" => await accounts.AdvanceGroupAsync(group, conversation!, source, ct),
+                    "send" => await accounts.SendGroupTextAsync(group, conversation!, command.Text!, source, ct),
+                    "flush" => await accounts.FlushGroupAsync(group, conversation!, source, ct),
+                    "publish" => await accounts.PublishGroupControlAsync(group, source, ct),
+                    "sync" => await accounts.SyncGroupControlAsync(group, conversation!, source, ct),
                     _ => throw new ArgumentException("Unsupported group operation.")
                 };
                 return new { status = command.Operation == "sync" ? "synced" : "stored", completed };
@@ -166,6 +174,10 @@ internal sealed class CliBusinessException(string phase, Exception error) : Exce
                 new[] { "Expired", "RateLimited", "StaleView", "Conflict", "OutcomeUnknown", "SizeFailure", "RecordTooLarge" }.Contains(groupStatus, StringComparer.Ordinal))
                 check = "GroupControl" + groupStatus;
             var exceptionType = current.GetType();
+            if (current is CryptographicException && exceptionType.Assembly == typeof(CryptographicException).Assembly &&
+                current.Data["Deep.MailboxGrant.Check"] is string grantReason &&
+                new[] { "Lifecycle", "Network", "Membership", "Epoch", "Issuer", "Generation", "IssuerWindow", "RouteExpiry", "Lifetime", "Signature" }.Contains(grantReason, StringComparer.Ordinal))
+                check = "Grant" + grantReason;
             if (current is CryptographicException && exceptionType.Assembly == typeof(CryptographicException).Assembly)
                 check = current.Message switch
                 {

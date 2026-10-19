@@ -5,6 +5,7 @@ param(
     [Parameter(Mandatory)][string]$RunDirectory,
     [switch]$ReusePublishedAccounts,
     [switch]$RequireFirstAttempt,
+    [switch]$PersistentSessions,
     [ValidateRange(0,31)][int]$SteadyStateRound = 0,
     [ValidateRange(0,31)][int]$GroupRevision = 0,
     [ValidatePattern('^[a-z][a-z0-9-]{0,31}$')][string]$AliceProfile = 'cli-gsr-alice',
@@ -32,6 +33,12 @@ $network = (Get-Content -LiteralPath (Join-Path $BootstrapDirectory 'deep-dev.js
 if ($network -cnotmatch '^[0-9a-f]{32}$') { throw 'Explicit public network binding required.' }
 $scenarioPath = $PSCommandPath
 $scenarioHash = (Get-FileHash -LiteralPath $scenarioPath -Algorithm SHA256).Hash
+$sessionModulePath = Join-Path $PSScriptRoot 'CliSession.psm1'
+$sessionModuleHash = (Get-FileHash -LiteralPath $sessionModulePath -Algorithm SHA256).Hash
+function Require-ScenarioInputs {
+    if ((Get-FileHash -LiteralPath $scenarioPath -Algorithm SHA256).Hash -cne $scenarioHash -or
+        (Get-FileHash -LiteralPath $sessionModulePath -Algorithm SHA256).Hash -cne $sessionModuleHash) { throw 'Scenario inputs changed.' }
+}
 function Runtime-Fingerprint {
     $root = [IO.Path]::GetDirectoryName($exe) + [IO.Path]::DirectorySeparatorChar
     $entries = @(Get-ChildItem -LiteralPath $root -Recurse -Force)
@@ -44,41 +51,58 @@ function Runtime-Fingerprint {
 $runtimeHash = Runtime-Fingerprint
 [void](New-Item -ItemType Directory -Path $run)
 Copy-Item -LiteralPath $scenarioPath -Destination (Join-Path $run 'scenario.ps1')
+Copy-Item -LiteralPath $sessionModulePath -Destination (Join-Path $run 'CliSession.psm1')
 if ((Get-FileHash -LiteralPath (Join-Path $run 'scenario.ps1') -Algorithm SHA256).Hash -cne $scenarioHash) { throw 'Scenario archive differs.' }
 Compress-Archive -LiteralPath ([IO.Path]::GetDirectoryName($exe)) -DestinationPath (Join-Path $run 'runtime.zip') -CompressionLevel Fastest
 if ((Runtime-Fingerprint) -cne $runtimeHash) { throw 'Runtime changed during archive.' }
 $started = [DateTime]::UtcNow
 $steps = [Collections.Generic.List[object]]::new()
+$sessions = @{}
+Import-Module (Join-Path $PSScriptRoot 'CliSession.psm1') -Force
 $networkArgs = @('--bootstrap', $BootstrapDirectory, '--registry', $RegistryOrigin)
 $groupName = 'GSR CLI QA '+$GroupRevision
 function Require([bool]$ok, [string]$label) { if (-not $ok) { throw $label } }
 function Invoke-Client([string]$phase, [string]$profile, [string[]]$command, [int]$attempt = 1) {
+    Require-ScenarioInputs
     Require ((Runtime-Fingerprint) -ceq $runtimeHash -and (Get-FileHash -LiteralPath $scenarioPath -Algorithm SHA256).Hash -ceq $scenarioHash) 'Scenario inputs changed.'
+    $budget = if ($command[0] -ceq 'group' -and $command[1] -in @('invite','accept','advance','send','flush','sync','publish')) { 1830000 } else { 330000 }
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    $process = $null
+    try {
+    if ($PersistentSessions) {
+        if (-not $sessions.ContainsKey($profile)) { $sessions[$profile] = New-CliSession $exe $profile $network $BootstrapDirectory $RegistryOrigin }
+        $response = Invoke-CliSession $sessions[$profile] ($command + @('--profile',$profile,'--network',$network)) $budget
+        $exitCode=$response.ExitCode; $processorMilliseconds=$response.ProcessorMilliseconds
+        $out=''; $err=''
+        if($exitCode -eq 0) { $out=$response.Result|ConvertTo-Json -Depth 32 -Compress }
+        else { $err=$response.Result|ConvertTo-Json -Depth 32 -Compress }
+    } else {
     $start = [Diagnostics.ProcessStartInfo]::new($exe)
     $start.UseShellExecute = $false; $start.CreateNoWindow = $true
     $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
     foreach ($arg in ($command + @('--profile',$profile,'--network',$network))) { [void]$start.ArgumentList.Add($arg) }
     $process = [Diagnostics.Process]::new(); $process.StartInfo = $start
-    $watch = [Diagnostics.Stopwatch]::StartNew()
-    try {
         if (-not $process.Start()) { throw 'CLI child not started.' }
         $stdout = $process.StandardOutput.ReadToEndAsync(); $stderr = $process.StandardError.ReadToEndAsync()
-        $budget = if ($command[0] -ceq 'group' -and $command[1] -in @('invite','accept','advance','send','flush','sync','publish')) { 1830000 } else { 330000 }
         if (-not $process.WaitForExit($budget)) { $process.Kill($true); throw 'CLI deadline; original work retained.' }
         $out = $stdout.GetAwaiter().GetResult(); $err = $stderr.GetAwaiter().GetResult()
+        $exitCode=$process.ExitCode; $processorMilliseconds=[long]$process.TotalProcessorTime.TotalMilliseconds
+    }
         Require ($out.Length + $err.Length -le 1048576) 'CLI output bound.'
+        Require-ScenarioInputs
         Require ((Runtime-Fingerprint) -ceq $runtimeHash -and (Get-FileHash -LiteralPath $scenarioPath -Algorithm SHA256).Hash -ceq $scenarioHash) 'Scenario inputs changed during child.'
-        $row = [pscustomobject]@{phase=$phase;exit=$process.ExitCode;milliseconds=$watch.ElapsedMilliseconds;processorMilliseconds=[long]$process.TotalProcessorTime.TotalMilliseconds;attempt=$attempt}
-        $metrics = $(if ($process.ExitCode -eq 0) { $out } else { $err }) | ConvertFrom-Json
+        $row = [pscustomobject]@{phase=$phase;exit=$exitCode;milliseconds=$watch.ElapsedMilliseconds;processorMilliseconds=$processorMilliseconds;attempt=$attempt}
+        $metrics = $(if ($exitCode -eq 0) { $out } else { $err }) | ConvertFrom-Json
         if ($metrics.PSObject.Properties.Name -contains 'networkWork') { $row | Add-Member networkWork @($metrics.networkWork) }
         if ($metrics.PSObject.Properties.Name -contains 'protectionWork') { $row | Add-Member protectionWork $metrics.protectionWork }
-        if ($process.ExitCode -eq 0 -and $command[0] -ceq 'mailbox' -and $command[1] -ceq 'sync') {
+        if ($metrics.PSObject.Properties.Name -contains 'sessionWork') { $row | Add-Member sessionWork $metrics.sessionWork }
+        if ($exitCode -eq 0 -and $command[0] -ceq 'mailbox' -and $command[1] -ceq 'sync') {
             $row | Add-Member processed $metrics.processed
             $row | Add-Member tombstones $metrics.tombstones
             $row | Add-Member hasMore $metrics.hasMore
         }
         $steps.Add($row); Write-Host ($row | ConvertTo-Json -Depth 8 -Compress)
-        if ($process.ExitCode -ne 0) {
+        if ($exitCode -ne 0) {
             $failure = $err | ConvertFrom-Json
             if ($failure.code -ceq 'business-operation-failed') {
                 $failure.diagnostic | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $run ('failure-'+$steps.Count+'.json')) -Encoding utf8
@@ -91,7 +115,7 @@ function Invoke-Client([string]$phase, [string]$profile, [string[]]$command, [in
             throw 'CLI operation failed; retain original accounts and pending group batch.'
         }
         return ($out | ConvertFrom-Json)
-    } finally { $process.Dispose() }
+    } finally { if($process) { $process.Dispose() } }
 }
 function Operation([string]$purpose) { [Convert]::ToHexStringLower([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes('Deep/CLI/GroupQA/20261018/'+$network+'/'+$AliceProfile+'/'+$BobProfile+'/'+$CarolProfile+'/'+$purpose))) }
 function Group-Head([string]$phase, [string]$profile) {
@@ -248,6 +272,7 @@ try {
         foreach ($recipient in $profiles | Where-Object { $_ -cne $sender }) { [void](Sync 'fanout-recipient-native-receive-ack' $recipient) }
     }
     foreach ($profile in $profiles) {
+        if($sessions.ContainsKey($profile)) { Close-CliSession $sessions[$profile]; $sessions.Remove($profile) }
         $messages = Invoke-Client 'three-way-cold-native-history' $profile @('group','messages','--group',$group)
         Require (@($messages.items).Count -eq 3*($SteadyStateRound+1) -and @($messages.items | Where-Object local).Count -eq ($SteadyStateRound+1)) 'Three-way semantic history missing or duplicated.'
         foreach ($sender in $profiles) { Require (@($messages.items | Where-Object { $_.text -ceq ($messagePrefix+$sender) -and $_.sequence -eq ($SteadyStateRound+1) }).Count -eq 1) 'Exact fanout plaintext mismatch.' }
@@ -266,10 +291,15 @@ try {
     if ($strictCommands) { Require (@($steps | Where-Object { $_.exit -ne 0 -or $_.attempt -ne 1 }).Count -eq 0) 'First-attempt run contains a retry or failed command.' }
     $passed = $true
 } finally {
+    $sessionCloseFailed=$false
+    foreach($session in @($sessions.Values)) {
+        try { Close-CliSession $session } catch { $sessionCloseFailed=$true; $passed=$false }
+    }
     [ordered]@{schema='deep.cli.connected-gsr-e2e.v1';passed=$passed;startedUtc=$started;finishedUtc=[DateTime]::UtcNow;
-        runtimeSha256=$runtimeHash;scenarioSha256=$scenarioHash.ToLowerInvariant();steps=@($steps.ToArray());
-        candidateAccounts=3;devicesPerAccount=1;groupRevision=$GroupRevision;steadyStateRound=$SteadyStateRound;reusedPublishedAccounts=[bool]$ReusePublishedAccounts;maximumExactAttempts=$(if($strictCommands){1}else{2});firstAttemptRequired=[bool]$strictCommands;gsr1FunctionalQualified=($passed -and $SteadyStateRound -eq 0);steadyStateQualified=($passed -and $SteadyStateRound -gt 0);gsr1RetentionQualified=$false;devicesQualified=$false;releaseQualified=$false} |
+        runtimeSha256=$runtimeHash;scenarioSha256=$scenarioHash.ToLowerInvariant();sessionModuleSha256=$sessionModuleHash.ToLowerInvariant();sessionCloseFailed=$sessionCloseFailed;steps=@($steps.ToArray());
+        candidateAccounts=3;devicesPerAccount=1;persistentSessions=[bool]$PersistentSessions;groupRevision=$GroupRevision;steadyStateRound=$SteadyStateRound;reusedPublishedAccounts=[bool]$ReusePublishedAccounts;maximumExactAttempts=$(if($strictCommands){1}else{2});firstAttemptRequired=[bool]$strictCommands;gsr1FunctionalQualified=($passed -and $SteadyStateRound -eq 0);steadyStateQualified=($passed -and $SteadyStateRound -gt 0);gsr1RetentionQualified=$false;devicesQualified=$false;releaseQualified=$false} |
         ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $run 'receipt.json') -Encoding utf8
     Write-Host ([pscustomobject]@{passed=$passed;commands=$steps.Count} | ConvertTo-Json -Compress)
+    if($sessionCloseFailed) { throw 'Session close failed; run remains unqualified.' }
 }
 

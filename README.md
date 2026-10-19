@@ -265,3 +265,29 @@ exactly three active members and one new command per sender; driver retries
 are disabled. It preserves old state and records a distinct steady-state result,
 never fresh creation/invitation/acceptance or release qualification. A failed
 round cannot be restarted as first-attempt evidence.
+
+## Persistent CLI sessions
+
+`deep session run --profile <alias> --network <hex> --bootstrap <public-bundle>
+--registry <HTTPS-origin>` accepts newline-terminated JSON arrays of ordinary
+CLI arguments on redirected stdin. Each command still includes its explicit
+profile/network and usual options. The host returns one JSON object containing
+`exitCode` and `result` per command. Send EOF to close; no TCP listener is opened.
+Commands execute serially under one exclusive profile lease. Switching profile,
+network, bootstrap or Registry, nested sessions, oversized frames and truncated
+commands are rejected. Failed business commands are not automatically retried.
+
+The Shared public composition and monotonic clock survive between commands.
+Established group work may reuse its still-valid public authority, with actual
+account/device/floor/time checks on every borrow. Contact Initial and fresh
+mailbox ACK retain independent acquisition. Every ten seconds an idle-only
+maintenance opportunity revalidates authority; it refreshes only when absent or
+within thirty seconds of its original proof deadline. It skips busy work, has a
+30s budget, and discards the composition on failure. `network refresh` forces a
+separate pre-effect refresh. No signed window, request deadline, private-key
+custody or durable retry semantics changes; see the
+[authority owner](../docs/architecture/ACCOUNT-DIRECTORY-TRANSPARENCY-V1.md#working-public-authority-and-delivery).
+
+The three-client driver accepts `-PersistentSessions`. It records this mode,
+archives its stdio helper, and closes each host before cold replay/history
+checks. Session measurements do not imply physical-device qualification.

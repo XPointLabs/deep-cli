@@ -4,6 +4,18 @@ namespace Deep.Cli.Tests;
 
 public sealed class BusinessCommandTests
 {
+    [Theory]
+    [InlineData("RouteExpiry", "GrantRouteExpiry")]
+    [InlineData("Issuer", "GrantIssuer")]
+    [InlineData("DO-NOT-EXPORT", "Unclassified")]
+    public void GrantDiagnosticsExportOnlyClosedReasons(string input, string expected)
+    {
+        var error = new System.Security.Cryptography.CryptographicException("DO-NOT-EXPORT");
+        error.Data["Deep.MailboxGrant.Check"] = input;
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(new CliBusinessException("GroupWork", error).ClosedDiagnostic()));
+        Assert.Equal(expected, json.RootElement.GetProperty("causes")[0].GetProperty("check").GetString());
+        Assert.DoesNotContain("DO-NOT-EXPORT", json.RootElement.GetRawText());
+    }
     [Fact]
     public void CompositeHostBudgetCoversPreparationWithoutChangingProtocolDeadlines() =>
         Assert.Equal(TimeSpan.FromMinutes(5), Program.CommandTimeout);

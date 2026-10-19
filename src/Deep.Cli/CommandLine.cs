@@ -25,7 +25,7 @@ internal sealed record CommandLine(string Operation, string Profile, byte[] Netw
         {
             ("account", "create") => new[] { "--name" },
             ("account", "status" or "address") or ("contact", "list" or "operations") or ("message", "pending") or ("attachment", "pending" or "operations") => [],
-            ("network", "verify") or ("mailbox", "sync") => ["--bootstrap", "--registry"],
+            ("session", "run") or ("network", "verify" or "refresh") or ("mailbox", "sync") => ["--bootstrap", "--registry"],
             ("contact", "request") => ["--bootstrap", "--registry", "--address", "--operation"],
             ("contact", "stop") => ["--bootstrap", "--registry", "--operation"],
             ("contact", "accept") => ["--bootstrap", "--registry", "--conversation", "--operation"],
