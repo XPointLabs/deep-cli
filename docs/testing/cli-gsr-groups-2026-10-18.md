@@ -4,6 +4,12 @@ Owner: Mr. X. Updated: 2026-10-19. The current three-member functional cycle
 passed through retained-state recovery in17–20. This is not first-attempt
 reliability, release, device, scale or long-offline acceptance.
 
+Subsequent public-read/native-grammar performance changes and the retained
+three-CLI rerun are recorded in the
+[2026-10-19 performance checkpoint](cli-gsr-performance-2026-10-19.md), including
+all failed/recovery attempts and operation timings. The228s samples below are
+the earlier baseline, not the current performance result.
+
 Normative allocation: [DR-0145](../../../docs/survival-program/decisions/DR-0145-owned-group-control-rendezvous.md).
 Custody/consumer mapping: [Shared](../../../deep-client-shared/docs/architecture/owned-connected-groups.md).
 
