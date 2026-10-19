@@ -90,6 +90,12 @@ against a group that already has second-round commands.
 Group batch commands have a bounded30-minute host budget; every individual
 transport deadline and signed authority window remains independently enforced.
 The driver may resume already published profiles with `-ReusePublishedAccounts`.
+`-RequireFirstAttempt` requires a new group with absent invitee state, disables
+the driver's error retry and requires every command to succeed on attempt1.
+Mailbox sync processes one page (new pages request at most two events) and
+returns `hasMore`. The three-client driver drains at most four successful pages
+using the real protected cursor; failed/unknown pages are never advanced or
+hidden as pagination. Original larger captured pages/ACKs resume unchanged.
 Run connected scenario scripts under PowerShell7.6.5 (`pwsh`), not Windows
 PowerShell5.1; native source-test wrappers still select5.1 as the workspace requires.
 After a completed cycle, `-GroupRevision 1` explicitly starts a separate named
@@ -250,3 +256,12 @@ creation without changing the original, and omitted the address from status.
 All six checks passed/native0. Output captured only in memory; the receipt has
 booleans and executable SHA256, no account addresses, keys or private paths.
 This qualifies **local account behavior only**, not network/contact/device E2E.
+
+For isolated steady-state group latency, the existing three-client scenario
+accepts `-ReusePublishedAccounts -SteadyStateRound N` with the exact retained
+`-GroupRevision` and three profiles. N is each participant's actual existing
+local message count, not a retry number. It requires matching native history,
+exactly three active members and one new command per sender; driver retries
+are disabled. It preserves old state and records a distinct steady-state result,
+never fresh creation/invitation/acceptance or release qualification. A failed
+round cannot be restarted as first-attempt evidence.

@@ -4,6 +4,8 @@ param(
     [Parameter(Mandatory)][string]$RegistryOrigin,
     [Parameter(Mandatory)][string]$RunDirectory,
     [switch]$ReusePublishedAccounts,
+    [switch]$RequireFirstAttempt,
+    [ValidateRange(0,31)][int]$SteadyStateRound = 0,
     [ValidateRange(0,31)][int]$GroupRevision = 0,
     [ValidatePattern('^[a-z][a-z0-9-]{0,31}$')][string]$AliceProfile = 'cli-gsr-alice',
     [ValidatePattern('^[a-z][a-z0-9-]{0,31}$')][string]$BobProfile = 'cli-gsr-bob',
@@ -11,6 +13,11 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ($SteadyStateRound -gt 0 -and (-not $ReusePublishedAccounts -or $RequireFirstAttempt)) {
+    throw 'Steady-state requires retained accounts and is distinct from fresh lifecycle qualification.'
+}
+$strictCommands = $RequireFirstAttempt -or $SteadyStateRound -gt 0
+$messagePrefix = if ($SteadyStateRound -gt 0) { 'Three CLI round '+($SteadyStateRound+1)+' ' } else { 'Three CLI ' }
 $repo = Split-Path $PSScriptRoot -Parent
 $exe = Join-Path $repo 'src/Deep.Cli/bin/Release/net10.0-windows/deep.exe'
 $run = [IO.Path]::GetFullPath($RunDirectory)
@@ -61,10 +68,15 @@ function Invoke-Client([string]$phase, [string]$profile, [string[]]$command, [in
         $out = $stdout.GetAwaiter().GetResult(); $err = $stderr.GetAwaiter().GetResult()
         Require ($out.Length + $err.Length -le 1048576) 'CLI output bound.'
         Require ((Runtime-Fingerprint) -ceq $runtimeHash -and (Get-FileHash -LiteralPath $scenarioPath -Algorithm SHA256).Hash -ceq $scenarioHash) 'Scenario inputs changed during child.'
-        $row = [pscustomobject]@{phase=$phase;exit=$process.ExitCode;milliseconds=$watch.ElapsedMilliseconds;attempt=$attempt}
+        $row = [pscustomobject]@{phase=$phase;exit=$process.ExitCode;milliseconds=$watch.ElapsedMilliseconds;processorMilliseconds=[long]$process.TotalProcessorTime.TotalMilliseconds;attempt=$attempt}
         $metrics = $(if ($process.ExitCode -eq 0) { $out } else { $err }) | ConvertFrom-Json
         if ($metrics.PSObject.Properties.Name -contains 'networkWork') { $row | Add-Member networkWork @($metrics.networkWork) }
         if ($metrics.PSObject.Properties.Name -contains 'protectionWork') { $row | Add-Member protectionWork $metrics.protectionWork }
+        if ($process.ExitCode -eq 0 -and $command[0] -ceq 'mailbox' -and $command[1] -ceq 'sync') {
+            $row | Add-Member processed $metrics.processed
+            $row | Add-Member tombstones $metrics.tombstones
+            $row | Add-Member hasMore $metrics.hasMore
+        }
         $steps.Add($row); Write-Host ($row | ConvertTo-Json -Depth 8 -Compress)
         if ($process.ExitCode -ne 0) {
             $failure = $err | ConvertFrom-Json
@@ -74,7 +86,7 @@ function Invoke-Client([string]$phase, [string]$profile, [string[]]$command, [in
                 $eligible = (($command[0] -in @('network','mailbox','contact')) -and ($command[1] -notin @('queue','create'))) -or
                     (($command[0] -ceq 'group') -and ($command[1] -in @('flush','invite','accept','advance','sync','publish')))
                 $transient = @($failure.diagnostic.causes | Where-Object { $_.category -in @('OutcomeUnknown','Cancelled','IngressRetryableBeforeForward') -or $_.check -in @('ClaimOutcomeUnknown','EndpointPairNetworkChanged','EndpointPairDirectoryExpired','EndpointPairDirectoryFloorAdvanced','EndpointPairDirectoryExpiredBeforeHandoff') }).Count -gt 0
-                if ($attempt -eq 1 -and $eligible -and $transient) { return Invoke-Client ($phase+'-exact-retry') $profile $command 2 }
+                if (-not $strictCommands -and $attempt -eq 1 -and $eligible -and $transient) { return Invoke-Client ($phase+'-exact-retry') $profile $command 2 }
             }
             throw 'CLI operation failed; retain original accounts and pending group batch.'
         }
@@ -89,9 +101,17 @@ function Group-Head([string]$phase, [string]$profile) {
     return $heads[0]
 }
 function Sync([string]$phase, [string]$profile) {
-    $result = Invoke-Client $phase $profile (@('mailbox','sync')+$networkArgs)
-    Require ($result.processed -eq $result.tombstones) 'Every received event requires independently qualified durable ACK.'
-    return $result
+    $processed = 0; $tombstones = 0
+    foreach ($page in 1..4) {
+        $result = Invoke-Client $phase $profile (@('mailbox','sync')+$networkArgs)
+        Require ($result.processed -eq $result.tombstones) 'Every received event requires independently qualified durable ACK.'
+        $processed += $result.processed; $tombstones += $result.tombstones
+        if (-not $result.hasMore) { return [pscustomobject]@{processed=$processed;tombstones=$tombstones;hasMore=$false} }
+        Require ($result.processed -gt 0) 'Non-final mailbox page made no durable progress.'
+        # Pagination is new work after a successful durable ACK, not a retry of
+        # a failed/unknown request. The actual protected owner holds the cursor.
+    }
+    throw 'Bounded mailbox page drain exhausted; preserve the actual cursor.'
 }
 $profiles = @($AliceProfile,$BobProfile,$CarolProfile)
 $pairConversations = @{}
@@ -109,6 +129,7 @@ function Ensure-Contact([string]$left,[string]$right) {
         $pairConversations[(Pair-Key $left $right)] = $common[0].conversation
         return
     }
+    Require ($SteadyStateRound -eq 0) 'Steady-state requires existing mutual contact consent; no setup repair.'
     if ($common.Count -eq 0) {
         $address = (Invoke-Client 'explicit-peer-address' $right @('account','address')).address
         [void](Invoke-Client 'pair-contact-request' $left (@('contact','request','--address',$address,'--operation',(Operation ('contact/'+(Pair-Key $left $right))))+$networkArgs))
@@ -138,8 +159,10 @@ try {
     Ensure-Contact $AliceProfile $BobProfile
     Ensure-Contact $AliceProfile $CarolProfile
     Ensure-Contact $BobProfile $CarolProfile
+    if ($SteadyStateRound -eq 0) {
     $groups = Invoke-Client 'owner-initial-group-list' $AliceProfile @('group','list')
     $matching = @($groups.items | Where-Object { $_.Name -ceq $groupName }); Require ($matching.Count -le 1) 'Ambiguous group.'
+    if ($RequireFirstAttempt) { Require ($matching.Count -eq 0) 'First-attempt qualification requires a new group, not retained recovery.' }
     if ($matching.Count -eq 0) { $group = (Invoke-Client 'owner-create-group' $AliceProfile (@('group','create','--name',$groupName)+$networkArgs)).group }
     else { $group = $matching[0].Group }
     $memberCount = 1
@@ -149,6 +172,7 @@ try {
         $recipientGroups = Invoke-Client 'retained-invitee-head-selection' $invitee @('group','list')
         $recipientHead = @($recipientGroups.items | Where-Object { $_.Name -ceq $groupName })
         Require ($recipientHead.Count -le 1) 'Ambiguous retained invitee group.'
+        if ($RequireFirstAttempt) { Require ($recipientHead.Count -eq 0) 'First-attempt invitee already has candidate state.' }
         if ($recipientHead.Count -eq 1 -and $beforeOwner.State -ceq 'Active' -and $beforeOwner.Epoch -ge ($memberCount-1) -and
             $recipientHead[0].State -ceq 'Active' -and $recipientHead[0].Group -ceq $group -and $recipientHead[0].Epoch -eq $beforeOwner.Epoch -and $recipientHead[0].Members -eq $beforeOwner.Members) {
             # Actual protected adoption already happened in an earlier receipt.
@@ -185,6 +209,15 @@ try {
             Require ($head.Group -ceq $group -and $head.State -ceq 'Active' -and $head.Epoch -eq $ownerHead.Epoch -and $head.Members -eq $ownerHead.Members -and $head.Members -eq $memberCount) 'Exact membership head mismatch.'
         }
     }
+    } else {
+        $group = (Group-Head 'retained-steady-owner-head' $AliceProfile).Group
+        foreach ($profile in $profiles) {
+            $head = Group-Head 'steady-native-command-preflight' $profile
+            Require ($head.Group -ceq $group -and $head.LocalMessageCommands -eq $SteadyStateRound) 'Steady-state must start before any command in this round.'
+            $history = Invoke-Client 'steady-native-history-preflight' $profile @('group','messages','--group',$group)
+            Require (@($history.items).Count -eq 3*$SteadyStateRound -and @($history.items | Where-Object local).Count -eq $SteadyStateRound) 'Steady-state native history differs.'
+        }
+    }
     $finalOwner = Group-Head 'exact-three-active-owner-head' $AliceProfile
     Require ($finalOwner.Group -ceq $group -and $finalOwner.State -ceq 'Active' -and $finalOwner.Members -eq 3) 'Owner must have exactly three active members.'
     foreach ($profile in @($BobProfile,$CarolProfile)) {
@@ -195,9 +228,10 @@ try {
         $peer = if ($sender -ceq $AliceProfile) { $BobProfile } else { $AliceProfile }
         $argsGroup = @('--group',$group,'--conversation',(Peer-Conversation $sender $peer))+$networkArgs
         $head = Group-Head 'sender-original-command-count' $sender
-        Require ($head.LocalMessageCommands -le 1) 'Unexpected retained semantic commands.'
-        if ($head.LocalMessageCommands -eq 0) { [void](Invoke-Client 'one-command-two-recipient-fanout' $sender (@('group','send','--text',('Three CLI '+$sender))+$argsGroup)) }
+        Require ($head.LocalMessageCommands -le ($SteadyStateRound+1)) 'Unexpected retained semantic commands.'
+        if ($head.LocalMessageCommands -eq $SteadyStateRound) { [void](Invoke-Client 'one-command-two-recipient-fanout' $sender (@('group','send','--text',($messagePrefix+$sender))+$argsGroup)) }
         else {
+            Require ($SteadyStateRound -eq 0) 'Steady-state cannot resume or replace a failed round.'
             # A resumed command may already have been received by every member.
             # Avoid verifying its entire historical batch twice in one run only
             # when every actual native history proves that exact semantic copy.
@@ -215,25 +249,26 @@ try {
     }
     foreach ($profile in $profiles) {
         $messages = Invoke-Client 'three-way-cold-native-history' $profile @('group','messages','--group',$group)
-        Require (@($messages.items).Count -eq 3 -and @($messages.items | Where-Object local).Count -eq 1) 'Three-way semantic history missing or duplicated.'
-        foreach ($sender in $profiles) { Require (@($messages.items | Where-Object { $_.text -ceq ('Three CLI '+$sender) }).Count -eq 1) 'Exact fanout plaintext mismatch.' }
+        Require (@($messages.items).Count -eq 3*($SteadyStateRound+1) -and @($messages.items | Where-Object local).Count -eq ($SteadyStateRound+1)) 'Three-way semantic history missing or duplicated.'
+        foreach ($sender in $profiles) { Require (@($messages.items | Where-Object { $_.text -ceq ($messagePrefix+$sender) -and $_.sequence -eq ($SteadyStateRound+1) }).Count -eq 1) 'Exact fanout plaintext mismatch.' }
         $peer = if ($profile -ceq $AliceProfile) { $BobProfile } else { $AliceProfile }
         [void](Invoke-Client 'cold-original-full-batch-replay' $profile (@('group','flush','--group',$group,'--conversation',(Peer-Conversation $profile $peer))+$networkArgs))
         $empty = Sync 'post-replay-empty-mailbox' $profile
         Require ($empty.processed -eq 0) 'Durably ACKed fanout reappeared.'
         $again = Invoke-Client 'post-replay-deduplicated-history' $profile @('group','messages','--group',$group)
-        Require (@($again.items).Count -eq 3) 'Fanout replay duplicated history.'
+        Require (@($again.items).Count -eq 3*($SteadyStateRound+1)) 'Fanout replay duplicated history.'
     }
     [void](Invoke-Client 'owner-cold-control-receipt-reverification' $AliceProfile (@('group','publish','--group',$group)+$networkArgs))
     foreach ($profile in @($BobProfile,$CarolProfile)) {
         $emptyControl = Invoke-Client 'cold-control-cursor-empty-replay' $profile (@('group','sync','--group',$group,'--conversation',(Peer-Conversation $AliceProfile $profile))+$networkArgs)
         Require ($emptyControl.status -ceq 'synced' -and $emptyControl.completed -eq 0) 'Control cursor replay did not remain empty.'
     }
+    if ($strictCommands) { Require (@($steps | Where-Object { $_.exit -ne 0 -or $_.attempt -ne 1 }).Count -eq 0) 'First-attempt run contains a retry or failed command.' }
     $passed = $true
 } finally {
     [ordered]@{schema='deep.cli.connected-gsr-e2e.v1';passed=$passed;startedUtc=$started;finishedUtc=[DateTime]::UtcNow;
         runtimeSha256=$runtimeHash;scenarioSha256=$scenarioHash.ToLowerInvariant();steps=@($steps.ToArray());
-        candidateAccounts=3;devicesPerAccount=1;groupRevision=$GroupRevision;reusedPublishedAccounts=[bool]$ReusePublishedAccounts;maximumExactAttempts=2;gsr1FunctionalQualified=[bool]$passed;gsr1RetentionQualified=$false;devicesQualified=$false;releaseQualified=$false} |
+        candidateAccounts=3;devicesPerAccount=1;groupRevision=$GroupRevision;steadyStateRound=$SteadyStateRound;reusedPublishedAccounts=[bool]$ReusePublishedAccounts;maximumExactAttempts=$(if($strictCommands){1}else{2});firstAttemptRequired=[bool]$strictCommands;gsr1FunctionalQualified=($passed -and $SteadyStateRound -eq 0);steadyStateQualified=($passed -and $SteadyStateRound -gt 0);gsr1RetentionQualified=$false;devicesQualified=$false;releaseQualified=$false} |
         ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $run 'receipt.json') -Encoding utf8
     Write-Host ([pscustomobject]@{passed=$passed;commands=$steps.Count} | ConvertTo-Json -Compress)
 }

@@ -138,6 +138,10 @@ for the difference, not hidden failed commands.
 
 ## Still excluded
 
+Subsequent timeout fixes and strict first-attempt candidate measurements are
+tracked in the [next checkpoint](cli-gsr-first-attempt-2026-10-19.md). This
+historical recovery baseline and its original failures remain unchanged.
+
 Expired prepared ACK / unknown GSR-write recovery, descriptor rotation/handover,
 400-day retention, remove/rekey/device/history policies, scale/soak, full/package
 qualification and device/release acceptance remain open. Earlier rejected
