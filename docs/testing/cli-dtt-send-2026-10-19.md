@@ -1,5 +1,9 @@
 # CLI send / DTT admission slice — 2026-10-19
 
+This is the retained checkpoint before the subsequent
+[message latency round](cli-message-latency-2026-10-19.md). Its handoff cursor and
+timings below are historical; the linked result is the current continuation.
+
 Owner: Mr. X. Local `deep-dev-current`, retained three CLI profiles and group
 `GSR CLI QA 11`. No MAUI/Android, production deployment, account reset or new
 cryptographic stack. Previous [working-session evidence](cli-working-session-2026-10-19.md)

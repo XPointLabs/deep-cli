@@ -97,6 +97,10 @@ function Invoke-Client([string]$phase, [string]$profile, [string[]]$command, [in
         if ($metrics.PSObject.Properties.Name -contains 'protectionWork') { $row | Add-Member protectionWork $metrics.protectionWork }
         if ($metrics.PSObject.Properties.Name -contains 'sessionWork') { $row | Add-Member sessionWork $metrics.sessionWork }
         if ($metrics.PSObject.Properties.Name -contains 'recoveryWork') { $row | Add-Member recoveryWork $metrics.recoveryWork }
+        if ($exitCode -eq 0 -and $command[0] -ceq 'group' -and $command[1] -in @('send','flush')) {
+            Require ($metrics.completed -ge 0 -and $metrics.completed -le 512) 'Group work count exceeds its closed batch bound.'
+            $row | Add-Member completedBatchItems $metrics.completed
+        }
         if ($exitCode -eq 0 -and $command[0] -ceq 'mailbox' -and $command[1] -ceq 'sync') {
             $row | Add-Member processed $metrics.processed
             $row | Add-Member tombstones $metrics.tombstones

@@ -10,7 +10,15 @@ Connected commands report `recoveryWork` separately from driver attempts: bounde
 Store/mailbox resumes and waits for protected retry leases. Recovery re-enters
 the original owned operation, never reruns queue/group creation or relaxes signed
 windows. See the [message/DTT checkpoint](docs/testing/cli-dtt-send-2026-10-19.md)
-for three-client results, retained failures and actual send/ACK durations.
+for retained failures. The current
+[message latency checkpoint](docs/testing/cli-message-latency-2026-10-19.md)
+records the complete three-client comparison and remaining data-plane delays.
+
+Build the solution with its explicit owned Shared/Protocol projects. A Release
+console with Debug dependencies is not a Release runtime: tests inspect all
+four actual dependency optimizer flags and reject a mixed graph. New group send
+drains unfinished work; explicit `group flush` still audits all original Stores.
+The E2E receipt records `completedBatchItems` to distinguish these operations.
 
 ## Available now
 

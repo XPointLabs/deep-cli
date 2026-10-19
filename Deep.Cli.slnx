@@ -1,4 +1,12 @@
 <Solution>
+  <!-- Explicit solution configurations prevent external ProjectReferences from
+       losing Release and silently rebuilding the owned runtime in Debug. -->
+  <Folder Name="/Owned runtime/">
+    <Project Path="../deep-client-shared/src/Deep.Client.Shared/Deep.Client.Shared.Production.csproj" />
+    <Project Path="../deep-protocol/src/Deep.Protocol/Deep.Protocol.csproj" />
+    <Project Path="../deep-protocol/src/Deep.Protocol.MembershipRoutes/Deep.Protocol.MembershipRoutes.csproj" />
+    <Project Path="../deep-protocol/src/Deep.Protocol.ProfileCarrier/Deep.Protocol.ProfileCarrier.csproj" />
+  </Folder>
   <Project Path="src/Deep.Cli/Deep.Cli.csproj" />
   <Project Path="tests/Deep.Cli.Tests/Deep.Cli.Tests.csproj" />
 </Solution>
