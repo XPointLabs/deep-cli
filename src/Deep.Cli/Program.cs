@@ -35,6 +35,7 @@ internal static class Program
     {
         using var work = ProtectionWork.Begin();
         using var networkWork = new NetworkWork();
+        var runtimeWork = new RuntimeWork();
         DeepIdV2AccountService? recoveryAccount = null;
         long initialStore = 0, initialMailbox = 0, initialWaits = 0;
         object RecoverySnapshot() => new
@@ -74,6 +75,7 @@ internal static class Program
                 var encoded = JsonSerializer.SerializeToNode(result)!.AsObject();
                 encoded["protectionWork"] = JsonSerializer.SerializeToNode(work.Snapshot());
                 encoded["networkWork"] = JsonSerializer.SerializeToNode(networkWork.Snapshot());
+                encoded["runtimeWork"] = JsonSerializer.SerializeToNode(runtimeWork.Snapshot());
                 encoded["recoveryWork"] = JsonSerializer.SerializeToNode(RecoverySnapshot());
                 if (session is not null) encoded["sessionWork"] = JsonSerializer.SerializeToNode(session.Snapshot());
                 await output.WriteLineAsync(encoded.ToJsonString());
@@ -98,7 +100,7 @@ internal static class Program
         catch (OperationCanceledException) { return await FailAsync(error, "cancelled", 130); }
         catch (CliBusinessException failure)
         {
-            await error.WriteLineAsync(JsonSerializer.Serialize(new { status = "error", code = "business-operation-failed", diagnostic = failure.ClosedDiagnostic(), protectionWork = work.Snapshot(), networkWork = networkWork.Snapshot(), recoveryWork = RecoverySnapshot() }));
+            await error.WriteLineAsync(JsonSerializer.Serialize(new { status = "error", code = "business-operation-failed", diagnostic = failure.ClosedDiagnostic(), protectionWork = work.Snapshot(), networkWork = networkWork.Snapshot(), runtimeWork = runtimeWork.Snapshot(), recoveryWork = RecoverySnapshot() }));
             return ct.IsCancellationRequested ? 130 : 6;
         }
         catch (ArgumentException) { return await FailAsync(error, "invalid-arguments", 2); }
