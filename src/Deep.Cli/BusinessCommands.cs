@@ -37,8 +37,7 @@ internal static class BusinessCommands
 
             DeepIdV2Conversation? conversation = null;
             if (command.Conversation is not null)
-                conversation = (await accounts.ListConversationsAsync(ct)).Single(x =>
-                    x.Conversation.ConversationId == command.Conversation).Conversation;
+                conversation = (await accounts.GetConversationAsync(command.Conversation, ct)).Conversation;
             if (command is { Area: "message", Operation: "list" })
                 return new { status = "ok", items = (await accounts.ListMessagesAsync(conversation!, ct)).Select(x => new
                 { text = x.Text, local = x.IsLocalAuthor, createdAt = x.CreatedAt }).ToArray() };

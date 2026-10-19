@@ -140,7 +140,12 @@ No replacement message or account was created. No fresh lifecycle
 first-attempt, release, package, retention, scale or device acceptance follows
 from recovery/control results. Historical failures remain retained.
 
-## Next bounded investigation
+## Historical next investigation — subsequently executed
+
+The following next step was executed in the
+[send/DTT checkpoint](cli-dtt-send-2026-10-19.md). Its retained failures and final
+strict receipt supersede this section's execution cursor; these older results
+are not retroactively relabelled.
 
 Do not start another fresh account/group lifecycle to hide the retained failure.
 These profiles now have six exact messages/two local commands each; a future

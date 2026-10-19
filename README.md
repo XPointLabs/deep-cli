@@ -6,6 +6,12 @@ no MAUI workloads, emulator or device deployment for the inner development loop.
 Place this repository beside `deep-client-shared` and `deep-protocol`, as in the
 XPointLabs workspace. Requires Windows and .NET SDK10.0.301 initially.
 
+Connected commands report `recoveryWork` separately from driver attempts: bounded
+Store/mailbox resumes and waits for protected retry leases. Recovery re-enters
+the original owned operation, never reruns queue/group creation or relaxes signed
+windows. See the [message/DTT checkpoint](docs/testing/cli-dtt-send-2026-10-19.md)
+for three-client results, retained failures and actual send/ACK durations.
+
 ## Available now
 
 ```powershell

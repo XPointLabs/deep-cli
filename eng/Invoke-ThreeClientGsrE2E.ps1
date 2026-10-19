@@ -96,6 +96,7 @@ function Invoke-Client([string]$phase, [string]$profile, [string[]]$command, [in
         if ($metrics.PSObject.Properties.Name -contains 'networkWork') { $row | Add-Member networkWork @($metrics.networkWork) }
         if ($metrics.PSObject.Properties.Name -contains 'protectionWork') { $row | Add-Member protectionWork $metrics.protectionWork }
         if ($metrics.PSObject.Properties.Name -contains 'sessionWork') { $row | Add-Member sessionWork $metrics.sessionWork }
+        if ($metrics.PSObject.Properties.Name -contains 'recoveryWork') { $row | Add-Member recoveryWork $metrics.recoveryWork }
         if ($exitCode -eq 0 -and $command[0] -ceq 'mailbox' -and $command[1] -ceq 'sync') {
             $row | Add-Member processed $metrics.processed
             $row | Add-Member tombstones $metrics.tombstones
@@ -295,7 +296,12 @@ try {
     foreach($session in @($sessions.Values)) {
         try { Close-CliSession $session } catch { $sessionCloseFailed=$true; $passed=$false }
     }
+    $recoveries=@($steps | Where-Object { $_.PSObject.Properties.Name -contains 'recoveryWork' } | ForEach-Object recoveryWork)
+    $storeResumes=[long](($recoveries | Measure-Object storeResumes -Sum).Sum)
+    $mailboxResumes=[long](($recoveries | Measure-Object mailboxResumes -Sum).Sum)
+    $leaseWaits=[long](($recoveries | Measure-Object leaseWaits -Sum).Sum)
     [ordered]@{schema='deep.cli.connected-gsr-e2e.v1';passed=$passed;startedUtc=$started;finishedUtc=[DateTime]::UtcNow;
+        automaticStoreResumes=$storeResumes;automaticMailboxResumes=$mailboxResumes;automaticLeaseWaits=$leaseWaits;noOwnedUnknownRecovery=($storeResumes -eq 0 -and $mailboxResumes -eq 0);
         runtimeSha256=$runtimeHash;scenarioSha256=$scenarioHash.ToLowerInvariant();sessionModuleSha256=$sessionModuleHash.ToLowerInvariant();sessionCloseFailed=$sessionCloseFailed;steps=@($steps.ToArray());
         candidateAccounts=3;devicesPerAccount=1;persistentSessions=[bool]$PersistentSessions;groupRevision=$GroupRevision;steadyStateRound=$SteadyStateRound;reusedPublishedAccounts=[bool]$ReusePublishedAccounts;maximumExactAttempts=$(if($strictCommands){1}else{2});firstAttemptRequired=[bool]$strictCommands;gsr1FunctionalQualified=($passed -and $SteadyStateRound -eq 0);steadyStateQualified=($passed -and $SteadyStateRound -gt 0);gsr1RetentionQualified=$false;devicesQualified=$false;releaseQualified=$false} |
         ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $run 'receipt.json') -Encoding utf8
