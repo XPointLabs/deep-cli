@@ -47,11 +47,14 @@ internal static class BusinessCommands
             phase = "Bootstrap";
             using var ownedNetwork = session is null ? await NetworkBootstrap.OpenAsync(command, accounts, ct) : null;
             var network = session is null ? ownedNetwork! : await session.GetNetworkAsync(command, ct);
-            // Independent receive/ACK/contact work can advance actual protected
-            // network custody. End the uncaptured group read phase first; never
-            // carry that memo into the next group command or renew old loans.
-            if (session is not null && command.Area != "group")
+            // Established sends borrow the session's still-current public
+            // authority. Independent receive/ACK/contact work may advance its
+            // protected floors, so only those boundaries discard the memo.
+            var established = command.Area is "group" or "message" or "attachment";
+            if (session is not null && !established)
                 await network.DiscardUncapturedGroupAuthorityAsync(ct);
+            var messagingSource = session is not null && established
+                ? network.EstablishedMessagingSource : network.Source;
             if (command is { Area: "contact", Operation: "route-health" })
                 return new { status = "ok", health = await accounts.ReadContactRouteHealthAsync(conversation!, network.Source, ct) };
             if (command is { Area: "contact", Operation: "refresh-route" })
@@ -84,7 +87,7 @@ internal static class BusinessCommands
             {
                 // Only established group work shares the public session memo.
                 // Initial/contact and mailbox receive/fresh ACK keep Source.
-                var source = session is null ? network.Source : network.EstablishedGroupSource;
+                var source = messagingSource;
                 if (command.Operation == "create")
                     return new { status = "created", group = await accounts.CreateGroupAsync(command.Name!, source, ct) };
                 var group = Convert.FromHexString(command.Group!);
@@ -107,22 +110,22 @@ internal static class BusinessCommands
                 using var input = new FileStream(command.File!, FileMode.Open, FileAccess.Read, FileShare.Read);
                 AttachmentFiles.RequireNoLinks(command.File!);
                 var prepared = await accounts.PrepareAttachmentAsync(Convert.FromHexString(command.OperationId!), input, input.Length,
-                    Path.GetFileName(command.File!), command.MediaType!, network.Source, ct);
+                    Path.GetFileName(command.File!), command.MediaType!, messagingSource, ct);
                 return new { status = "prepared", prepared.Operation, prepared.ObjectId, prepared.Bytes, prepared.PlaintextSha256, prepared.ExpiresAtUnixSeconds };
             }
             if (phase == "AttachmentSend")
             {
                 var stored = await accounts.SendAttachmentAsync(conversation!, Convert.FromHexString(command.Asset!),
-                    Convert.FromHexString(command.OperationId!), network.Source, ct);
+                    Convert.FromHexString(command.OperationId!), messagingSource, ct);
                 return new { status = "stored", ingressDispatched = stored.IngressDispatched };
             }
             if (phase == "AttachmentQueue")
             {
-                var operation = await accounts.QueueAttachmentAsync(conversation!, Convert.FromHexString(command.Asset!), network.Source, ct);
+                var operation = await accounts.QueueAttachmentAsync(conversation!, Convert.FromHexString(command.Asset!), messagingSource, ct);
                 return new { status = "queued", operation = Convert.ToHexStringLower(operation.Span) };
             }
             if (phase == "AttachmentDownload")
-                return await AttachmentFiles.DownloadAsync(command, accounts, conversation!, network.Source, ct);
+                return await AttachmentFiles.DownloadAsync(command, accounts, conversation!, messagingSource, ct);
             if (phase == "ContactRequest")
             {
                 var result = await accounts.StartContactAsync(DeepPermanentIdV2.ParseCanonical(command.Address!),
@@ -147,10 +150,10 @@ internal static class BusinessCommands
             }
             if (phase == "TextQueue")
             {
-                var operation = await accounts.QueueTextAsync(conversation!, command.Text!, network.Source, ct);
+                var operation = await accounts.QueueTextAsync(conversation!, command.Text!, messagingSource, ct);
                 return new { status = "queued", operation = Convert.ToHexStringLower(operation.Span) };
             }
-            var sent = await accounts.RetryTextAsync(conversation!, Convert.FromHexString(command.OperationId!), command.Text!, network.Source, ct);
+            var sent = await accounts.RetryTextAsync(conversation!, Convert.FromHexString(command.OperationId!), command.Text!, messagingSource, ct);
             return new { status = "stored", ingressDispatched = sent.IngressDispatched };
         }
         catch (Exception error)

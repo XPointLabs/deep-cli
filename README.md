@@ -19,8 +19,12 @@ console with Debug dependencies is not a Release runtime: tests inspect all
 four actual dependency optimizer flags and reject a mixed graph. New group send
 drains unfinished work; explicit `group flush` still audits all original Stores.
 The E2E receipt records `completedBatchItems` to distinguish these operations.
-Before an independent network/contact/message/mailbox operation, the serial host
-discards only uncaptured public group reads. A later group operation reacquires
+Before an independent network/contact/mailbox operation, the serial host
+discards only uncaptured public working reads. Established text, attachment and
+group commands now share the same bounded `EstablishedMessagingSource`.
+This avoids rebuilding the network/endpoint chain at each internal send step;
+the actual protected state/time checks and the original expiry are unchanged.
+A later established operation reacquires
 actual protected network custody, rather than failing on a memo from before an
 independent ACK advanced it. Captured loans and all floor/fork/clock guards remain
 unchanged; this boundary does not retry a command or weaken authority.
