@@ -158,3 +158,8 @@ The failed/partial runs must not be averaged into a successful Store latency.
 
 Full source/frozen/package, sustained/scale, physical device and release gates
 remain separate and OPEN. This source slice does not constitute a ready release.
+
+Follow-up: [protected reservation and exact original recovery](cli-atomic-reservation-2026-10-20.md)
+records the supported metadata repair, successful original Store/ACK, fresh text
+timings and subsequent three-CLI results. This checkpoint's failures and partial
+measurements are retained; its unfinished reservation is not the current verdict.
