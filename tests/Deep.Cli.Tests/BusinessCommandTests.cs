@@ -24,6 +24,24 @@ public sealed class BusinessCommandTests
     private const string Operation = "3333333333333333333333333333333333333333333333333333333333333333";
 
     [Theory]
+    [InlineData("route-health")]
+    [InlineData("refresh-route")]
+    public void RouteCommandsRequireExistingConversationAndHaveNoCallerAuthoredInputs(string verb)
+    {
+        string[] common = ["--profile", "alice", "--network", Network, "--bootstrap", "public-bundle",
+            "--registry", "https://localhost:28543/"];
+        Assert.Throws<ArgumentException>(() => CommandLine.Parse(["contact", verb, .. common]));
+        var parsed = CommandLine.Parse(["contact", verb, .. common, "--conversation", Conversation]);
+        Assert.Equal(verb, parsed.Operation);
+        Assert.Throws<ArgumentException>(() => CommandLine.Parse(["contact", verb, .. common,
+            "--conversation", Conversation, "--operation", Operation]));
+        var health = new Deep.Client.Shared.Services.DeepIdV2ContactRouteHealth(false, false, true);
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(health));
+        Assert.Equal(3, json.RootElement.EnumerateObject().Count());
+        Assert.All(json.RootElement.EnumerateObject(), property => Assert.True(property.Value.ValueKind is JsonValueKind.False or JsonValueKind.True));
+    }
+
+    [Theory]
     [InlineData("network", "verify")]
     [InlineData("mailbox", "sync")]
     public void NetworkCommandsRequireExplicitBootstrapAndHttpsOrigin(string area, string verb)

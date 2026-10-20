@@ -19,6 +19,11 @@ console with Debug dependencies is not a Release runtime: tests inspect all
 four actual dependency optimizer flags and reject a mixed graph. New group send
 drains unfinished work; explicit `group flush` still audits all original Stores.
 The E2E receipt records `completedBatchItems` to distinguish these operations.
+Before an independent network/contact/message/mailbox operation, the serial host
+discards only uncaptured public group reads. A later group operation reacquires
+actual protected network custody, rather than failing on a memo from before an
+independent ACK advanced it. Captured loans and all floor/fork/clock guards remain
+unchanged; this boundary does not retry a command or weaken authority.
 
 ## Available now
 
@@ -63,6 +68,24 @@ only. `networkWork` groups public HTTP by a closed endpoint category;
 it contains counts/status totals/durations, never URLs, bodies or identifiers.
 
 ## Real network and business commands
+
+For an existing consented conversation, `contact route-health --conversation`
+with the normal network options returns coarse interval diagnostics only.
+`contact refresh-route --conversation` renews the own publication if due and
+sends its exact successor over that conversation's CURRENT reverse mailbox path.
+It returns `completed:0` when actual native advertisement is unchanged, or1 only
+after verified Store. Receiver `mailbox sync` still performs actual native
+receive and independently durable ACK. This is not an expired-route bypass or a
+claim that the XUR update service is composed in Shared. If both usable paths
+are gone, keep original work; do not reset contacts/accounts or substitute routes.
+
+`eng/Invoke-ContactRouteRepair.ps1` qualifies explicit retained publisher/recipient
+pairs without account creation. Its receipts capture frozen runtime/scenario,
+numeric work, control receive/ACK and no-new-control replay. The group driver has
+an explicit `-RecoverIncompleteSteadyRound` mode for the same semantic round:
+it verifies exact retained local commands before original flush and marks
+`recoveryQualified`, never `firstAttemptRequired`/`steadyStateQualified`.
+Default strict rounds still reject incomplete starting state and allow no retry.
 
 The DR-0145 GSR1 multi-account group candidate requires newly created isolated CLI profiles:
 application SQL schema17, ordinary journal9 and mandatory protected group

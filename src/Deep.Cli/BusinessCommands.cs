@@ -47,6 +47,18 @@ internal static class BusinessCommands
             phase = "Bootstrap";
             using var ownedNetwork = session is null ? await NetworkBootstrap.OpenAsync(command, accounts, ct) : null;
             var network = session is null ? ownedNetwork! : await session.GetNetworkAsync(command, ct);
+            // Independent receive/ACK/contact work can advance actual protected
+            // network custody. End the uncaptured group read phase first; never
+            // carry that memo into the next group command or renew old loans.
+            if (session is not null && command.Area != "group")
+                await network.DiscardUncapturedGroupAuthorityAsync(ct);
+            if (command is { Area: "contact", Operation: "route-health" })
+                return new { status = "ok", health = await accounts.ReadContactRouteHealthAsync(conversation!, network.Source, ct) };
+            if (command is { Area: "contact", Operation: "refresh-route" })
+            {
+                phase = "ContactRouteMaintenance";
+                return new { status = "stored", completed = await accounts.RefreshContactRouteAsync(conversation!, network.Source, ct) };
+            }
             phase = (command.Area, command.Operation) switch
             {
                 ("network", "verify") => "NetworkVerify",

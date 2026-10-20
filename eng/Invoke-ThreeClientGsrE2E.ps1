@@ -6,6 +6,7 @@ param(
     [switch]$ReusePublishedAccounts,
     [switch]$RequireFirstAttempt,
     [switch]$PersistentSessions,
+    [switch]$RecoverIncompleteSteadyRound,
     [ValidateRange(0,31)][int]$SteadyStateRound = 0,
     [ValidateRange(0,31)][int]$GroupRevision = 0,
     [ValidatePattern('^[a-z][a-z0-9-]{0,31}$')][string]$AliceProfile = 'cli-gsr-alice',
@@ -16,6 +17,9 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if ($SteadyStateRound -gt 0 -and (-not $ReusePublishedAccounts -or $RequireFirstAttempt)) {
     throw 'Steady-state requires retained accounts and is distinct from fresh lifecycle qualification.'
+}
+if ($RecoverIncompleteSteadyRound -and ($SteadyStateRound -eq 0 -or -not $ReusePublishedAccounts -or $RequireFirstAttempt)) {
+    throw 'Recovery requires an explicit incomplete retained steady round; it can never qualify first attempt.'
 }
 $strictCommands = $RequireFirstAttempt -or $SteadyStateRound -gt 0
 $messagePrefix = if ($SteadyStateRound -gt 0) { 'Three CLI round '+($SteadyStateRound+1)+' ' } else { 'Three CLI ' }
@@ -243,9 +247,18 @@ try {
         $group = (Group-Head 'retained-steady-owner-head' $AliceProfile).Group
         foreach ($profile in $profiles) {
             $head = Group-Head 'steady-native-command-preflight' $profile
-            Require ($head.Group -ceq $group -and $head.LocalMessageCommands -eq $SteadyStateRound) 'Steady-state must start before any command in this round.'
+            Require ($head.Group -ceq $group -and ($head.LocalMessageCommands -eq $SteadyStateRound -or
+                ($RecoverIncompleteSteadyRound -and $head.LocalMessageCommands -eq ($SteadyStateRound+1)))) 'Steady-state must start before any command, or explicitly recover its original incomplete round.'
             $history = Invoke-Client 'steady-native-history-preflight' $profile @('group','messages','--group',$group)
-            Require (@($history.items).Count -eq 3*$SteadyStateRound -and @($history.items | Where-Object local).Count -eq $SteadyStateRound) 'Steady-state native history differs.'
+            if ($RecoverIncompleteSteadyRound) {
+                Require (@($history.items).Count -ge 3*$SteadyStateRound -and @($history.items).Count -le 3*($SteadyStateRound+1) -and
+                    @($history.items | Where-Object local).Count -eq $head.LocalMessageCommands) 'Incomplete round native history differs.'
+                if ($head.LocalMessageCommands -eq ($SteadyStateRound+1)) {
+                    Require (@($history.items | Where-Object { $_.local -and $_.text -ceq ($messagePrefix+$profile) -and $_.sequence -eq ($SteadyStateRound+1) }).Count -eq 1) 'Recovery must select the exact original local command.'
+                }
+            } else {
+                Require (@($history.items).Count -eq 3*$SteadyStateRound -and @($history.items | Where-Object local).Count -eq $SteadyStateRound) 'Steady-state native history differs.'
+            }
         }
     }
     $finalOwner = Group-Head 'exact-three-active-owner-head' $AliceProfile
@@ -261,7 +274,7 @@ try {
         Require ($head.LocalMessageCommands -le ($SteadyStateRound+1)) 'Unexpected retained semantic commands.'
         if ($head.LocalMessageCommands -eq $SteadyStateRound) { [void](Invoke-Client 'one-command-two-recipient-fanout' $sender (@('group','send','--text',($messagePrefix+$sender))+$argsGroup)) }
         else {
-            Require ($SteadyStateRound -eq 0) 'Steady-state cannot resume or replace a failed round.'
+            Require ($SteadyStateRound -eq 0 -or $RecoverIncompleteSteadyRound) 'Steady-state cannot resume or replace a failed round.'
             # A resumed command may already have been received by every member.
             # Avoid verifying its entire historical batch twice in one run only
             # when every actual native history proves that exact semantic copy.
@@ -269,7 +282,7 @@ try {
             $receivedByAll = $true
             foreach ($profile in $profiles) {
                 $history = Invoke-Client 'retained-semantic-copy-native-history' $profile @('group','messages','--group',$group)
-                $copies = @($history.items | Where-Object { $_.text -ceq ('Three CLI '+$sender) -and $_.sequence -eq 1 })
+                $copies = @($history.items | Where-Object { $_.text -ceq ($messagePrefix+$sender) -and $_.sequence -eq ($SteadyStateRound+1) })
                 Require ($copies.Count -le 1) 'Retained semantic history duplicated.'
                 if ($copies.Count -ne 1) { $receivedByAll = $false }
             }
@@ -308,7 +321,7 @@ try {
     [ordered]@{schema='deep.cli.connected-gsr-e2e.v1';passed=$passed;startedUtc=$started;finishedUtc=[DateTime]::UtcNow;
         automaticStoreResumes=$storeResumes;automaticMailboxResumes=$mailboxResumes;automaticLeaseWaits=$leaseWaits;noOwnedUnknownRecovery=($storeResumes -eq 0 -and $mailboxResumes -eq 0);
         runtimeSha256=$runtimeHash;scenarioSha256=$scenarioHash.ToLowerInvariant();sessionModuleSha256=$sessionModuleHash.ToLowerInvariant();sessionCloseFailed=$sessionCloseFailed;steps=@($steps.ToArray());
-        candidateAccounts=3;devicesPerAccount=1;persistentSessions=[bool]$PersistentSessions;groupRevision=$GroupRevision;steadyStateRound=$SteadyStateRound;reusedPublishedAccounts=[bool]$ReusePublishedAccounts;maximumExactAttempts=$(if($strictCommands){1}else{2});firstAttemptRequired=[bool]$strictCommands;gsr1FunctionalQualified=($passed -and $SteadyStateRound -eq 0);steadyStateQualified=($passed -and $SteadyStateRound -gt 0);gsr1RetentionQualified=$false;devicesQualified=$false;releaseQualified=$false} |
+        candidateAccounts=3;devicesPerAccount=1;persistentSessions=[bool]$PersistentSessions;groupRevision=$GroupRevision;steadyStateRound=$SteadyStateRound;reusedPublishedAccounts=[bool]$ReusePublishedAccounts;maximumExactAttempts=$(if($strictCommands){1}else{2});firstAttemptRequired=($strictCommands -and -not $RecoverIncompleteSteadyRound);recoveryRequired=[bool]$RecoverIncompleteSteadyRound;recoveryQualified=($passed -and $RecoverIncompleteSteadyRound);gsr1FunctionalQualified=($passed -and $SteadyStateRound -eq 0);steadyStateQualified=($passed -and $SteadyStateRound -gt 0 -and -not $RecoverIncompleteSteadyRound);gsr1RetentionQualified=$false;devicesQualified=$false;releaseQualified=$false} |
         ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $run 'receipt.json') -Encoding utf8
     Write-Host ([pscustomobject]@{passed=$passed;commands=$steps.Count} | ConvertTo-Json -Compress)
     if($sessionCloseFailed) { throw 'Session close failed; run remains unqualified.' }
