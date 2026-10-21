@@ -62,6 +62,12 @@ internal static class BusinessCommands
                 phase = "ContactRouteMaintenance";
                 return new { status = "stored", completed = await accounts.RefreshContactRouteAsync(conversation!, network.Source, ct) };
             }
+            if (command is { Area: "contact", Operation: "reintroduce-route" })
+            {
+                phase = "ContactRouteReintroduction";
+                return new { status = "stored", completed = await accounts.ReintroduceContactRouteAsync(conversation!,
+                    DeepPermanentIdV2.ParseCanonical(command.Address!), network.Source, ct) };
+            }
             phase = (command.Area, command.Operation) switch
             {
                 ("network", "verify") => "NetworkVerify",

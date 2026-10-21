@@ -30,6 +30,7 @@ internal sealed record CommandLine(string Operation, string Profile, byte[] Netw
             ("contact", "stop") => ["--bootstrap", "--registry", "--operation"],
             ("contact", "accept") => ["--bootstrap", "--registry", "--conversation", "--operation"],
             ("contact", "route-health" or "refresh-route") => ["--bootstrap", "--registry", "--conversation"],
+            ("contact", "reintroduce-route") => ["--bootstrap", "--registry", "--conversation", "--address"],
             ("message", "queue") => ["--bootstrap", "--registry", "--conversation", "--text"],
             ("message", "send") => ["--bootstrap", "--registry", "--conversation", "--operation", "--text"],
             ("message", "list") => ["--conversation"],

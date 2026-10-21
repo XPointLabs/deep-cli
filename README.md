@@ -57,6 +57,22 @@ DPAPI-wrapped per-write AES-256-GCM aggregate protection and the same Shared SQL
 hold an exclusive per-profile lease; no MAUI, Android or production state is opened.
 Keep QA profiles for restart/recovery testing instead of resetting after failures.
 
+For an established contact whose reverse route and XUR have both expired:
+
+```text
+deep contact reintroduce-route --profile alice --network <network> --bootstrap <public bundle> --registry <HTTPS origin> --conversation <existing conversation> --address <same peer permanent address>
+```
+
+The peer must first publish its current own route (`network verify`). This reads
+and independently verifies a current same-peer publication and carries ONLY the
+existing relationship's encrypted native route-maintenance control. It creates
+no new contact/account/ratchet and never uses an expired XRA/XUR as authority.
+The peer then runs `mailbox sync`, ordinary `contact refresh-route`, and the
+sender runs `mailbox sync`. Native forks, gaps, changed endpoints and missing
+original custody still refuse; a reset or new logical message is not recovery.
+`eng/Invoke-ContactRouteRepair.ps1 -Reintroduce` exercises that bidirectional flow
+on explicit retained CLI profiles, keeping public addresses only in memory.
+
 Every aggregate decryption unwraps its32-byte key with native current-user DPAPI,
 authenticates the complete ciphertext/header with a128-bit GCM tag, and zeroes
 the key immediately. Every write uses a new random key and96-bit nonce. No

@@ -4,7 +4,8 @@ param(
     [Parameter(Mandatory)][string]$RegistryOrigin,
     [Parameter(Mandatory)][string]$RunDirectory,
     [Parameter(Mandatory)][ValidatePattern('^[a-z][a-z0-9-]{0,31}$')][string]$PublisherProfile,
-    [Parameter(Mandatory)][ValidateCount(1,8)][string[]]$RecipientProfiles
+    [Parameter(Mandatory)][ValidateCount(1,8)][string[]]$RecipientProfiles,
+    [switch]$Reintroduce
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
@@ -60,12 +61,30 @@ try{
         $common=@($publisher.contacts|Where-Object {$_.conversation -in @($peer.contacts|ForEach-Object conversation)})
         if($common.Count -ne 1){throw 'One exact retained pair required; no contact creation.'}
         $conversation=$common[0].conversation
-        $repair=Call 'publish-owned-successor-through-live-reverse-route' $PublisherProfile (@('contact','refresh-route','--conversation',$conversation)+$net)
+        if($Reintroduce){
+            [void](Call 'recipient-current-own-publication-maintenance' $recipient (@('network','verify')+$net))
+            # Read only the peer's explicitly requested public address through
+            # its real CLI. It remains in RAM and is never logged or archived.
+            $address=Call 'read-existing-peer-public-address' $recipient @('account','address')
+            if(-not $address.accountPresent -or [string]::IsNullOrWhiteSpace($address.address)){throw 'Existing peer address unavailable; no account creation.'}
+            $repair=Call 'current-same-peer-reintroduction-native-control-store' $PublisherProfile (@('contact','reintroduce-route','--conversation',$conversation,'--address',$address.address)+$net)
+            $address=$null
+        }else{
+            $repair=Call 'publish-owned-successor-through-live-reverse-route' $PublisherProfile (@('contact','refresh-route','--conversation',$conversation)+$net)
+        }
         if($repair.completed -notin @(0,1)){throw 'Unexpected maintenance result.'}
         $page=Call 'recipient-native-control-receive-ack' $recipient (@('mailbox','sync')+$net)
         if($page.hasMore -or $page.processed -ne $page.tombstones){throw 'Control receive/ACK incomplete; no implicit retry.'}
         $health=Call 'recipient-retained-route-interval-check' $recipient (@('contact','route-health','--conversation',$conversation)+$net)
         if(-not $health.health.AdvertisementIntervalCoversNow -or $health.health.RouteFaultRetained){throw 'Peer advertisement remains expired/faulted.'}
+        if($Reintroduce){
+            $reverse=Call 'ordinary-reverse-native-route-maintenance' $recipient (@('contact','refresh-route','--conversation',$conversation)+$net)
+            if($reverse.completed -notin @(0,1)){throw 'Unexpected reverse maintenance result.'}
+            $back=Call 'publisher-native-control-receive-ack' $PublisherProfile (@('mailbox','sync')+$net)
+            if($back.hasMore -or $back.processed -ne $back.tombstones){throw 'Reverse receive/ACK incomplete; no implicit retry.'}
+            $reverseHealth=Call 'publisher-retained-route-interval-check' $PublisherProfile (@('contact','route-health','--conversation',$conversation)+$net)
+            if(-not $reverseHealth.health.AdvertisementIntervalCoversNow -or $reverseHealth.health.RouteFaultRetained){throw 'Reverse advertisement remains expired/faulted.'}
+        }
         $again=Call 'exact-maintenance-no-new-control' $PublisherProfile (@('contact','refresh-route','--conversation',$conversation)+$net)
         if($again.completed -ne 0){throw 'Maintenance created duplicate work.'}
     }
@@ -74,7 +93,7 @@ try{
     foreach($session in @($sessions.Values)){try{Close-CliSession $session}catch{$closeFailed=$true;$passed=$false}}
     if((RuntimeHash) -cne $runtimeHash){$passed=$false}
     [ordered]@{passed=$passed;runtimeSha256=$runtimeHash;scenarioSha256=$scenarioHash.ToLowerInvariant();sessionModuleSha256=$moduleHash.ToLowerInvariant();
-        recipientCount=$RecipientProfiles.Count;sessionCloseFailed=$closeFailed;steps=$steps.ToArray();releaseQualified=$false}|ConvertTo-Json -Depth 12|
+        recipientCount=$RecipientProfiles.Count;reintroduction=[bool]$Reintroduce;sessionCloseFailed=$closeFailed;steps=$steps.ToArray();releaseQualified=$false}|ConvertTo-Json -Depth 12|
         Set-Content -LiteralPath (Join-Path $run 'receipt.json') -Encoding utf8
     Write-Host ([pscustomobject]@{passed=$passed;commands=$steps.Count}|ConvertTo-Json -Compress)
     if($closeFailed){throw 'Repair session did not close normally.'}

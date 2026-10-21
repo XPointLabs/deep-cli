@@ -23,6 +23,18 @@ public sealed class BusinessCommandTests
     private const string Conversation = "2222222222222222222222222222222222222222222222222222222222222222";
     private const string Operation = "3333333333333333333333333333333333333333333333333333333333333333";
 
+    [Fact]
+    public void RouteReintroductionRequiresAddressAndExistingConversationButNoRawRouteOrOperation()
+    {
+        string[] common = ["contact", "reintroduce-route", "--profile", "alice", "--network", Network,
+            "--bootstrap", "public-bundle", "--registry", "https://localhost:28543/", "--conversation", Conversation];
+        Assert.Throws<ArgumentException>(() => CommandLine.Parse(common));
+        var parsed = CommandLine.Parse([.. common, "--address", "untrusted-address-for-owned-verification"]);
+        Assert.Equal("reintroduce-route", parsed.Operation); Assert.Null(parsed.OperationId);
+        Assert.Throws<ArgumentException>(() => CommandLine.Parse([.. common, "--address", "candidate", "--operation", Operation]));
+        Assert.Throws<ArgumentException>(() => CommandLine.Parse([.. common, "--address", "candidate", "--route", "raw"]));
+    }
+
     [Theory]
     [InlineData("route-health")]
     [InlineData("refresh-route")]
