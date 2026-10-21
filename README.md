@@ -323,6 +323,19 @@ are disabled. It preserves old state and records a distinct steady-state result,
 never fresh creation/invitation/acceptance or release qualification. A failed
 round cannot be restarted as first-attempt evidence.
 
+For repeated delivery-only measurements, add the explicit `-DeliveryOnly` switch
+to a NEW retained steady round. It still verifies three senders, six native
+receive/ACKs, exact cold semantic histories, empty mailboxes and deduplication.
+It omits only the separate all-original-Store replay and GSR cold-control audit;
+the default full scenario is unchanged. Its receipt records `deliveryOnly=true`,
+`deliveryLatencyQualified`, and always `steadyStateQualified=false`; it cannot
+qualify full lifecycle, recovery, retention, devices or a release. Run the full
+scenario after the final runtime change. A failed delivery-only round must be
+recovered with the FULL supported `-RecoverIncompleteSteadyRound` on the same
+round, never replaced by a new command. Invalid scope combinations reject before
+opening a profile/network. Check these guards with
+`pwsh -NoProfile -File eng/Test-ThreeClientGsrScopes.ps1`.
+
 ## Persistent CLI sessions
 
 `deep session run --profile <alias> --network <hex> --bootstrap <public-bundle>

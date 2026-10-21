@@ -7,6 +7,7 @@ param(
     [switch]$RequireFirstAttempt,
     [switch]$PersistentSessions,
     [switch]$RecoverIncompleteSteadyRound,
+    [switch]$DeliveryOnly,
     [ValidateRange(0,31)][int]$SteadyStateRound = 0,
     [ValidateRange(0,31)][int]$GroupRevision = 0,
     [ValidatePattern('^[a-z][a-z0-9-]{0,31}$')][string]$AliceProfile = 'cli-gsr-alice',
@@ -20,6 +21,9 @@ if ($SteadyStateRound -gt 0 -and (-not $ReusePublishedAccounts -or $RequireFirst
 }
 if ($RecoverIncompleteSteadyRound -and ($SteadyStateRound -eq 0 -or -not $ReusePublishedAccounts -or $RequireFirstAttempt)) {
     throw 'Recovery requires an explicit incomplete retained steady round; it can never qualify first attempt.'
+}
+if ($DeliveryOnly -and ($SteadyStateRound -eq 0 -or -not $ReusePublishedAccounts -or $RecoverIncompleteSteadyRound -or $RequireFirstAttempt)) {
+    throw 'Delivery-only requires a new retained steady round; recovery and full lifecycle qualification remain separate.'
 }
 $strictCommands = $RequireFirstAttempt -or $SteadyStateRound -gt 0
 $messagePrefix = if ($SteadyStateRound -gt 0) { 'Three CLI round '+($SteadyStateRound+1)+' ' } else { 'Three CLI ' }
@@ -296,16 +300,22 @@ try {
         Require (@($messages.items).Count -eq 3*($SteadyStateRound+1) -and @($messages.items | Where-Object local).Count -eq ($SteadyStateRound+1)) 'Three-way semantic history missing or duplicated.'
         foreach ($sender in $profiles) { Require (@($messages.items | Where-Object { $_.text -ceq ($messagePrefix+$sender) -and $_.sequence -eq ($SteadyStateRound+1) }).Count -eq 1) 'Exact fanout plaintext mismatch.' }
         $peer = if ($profile -ceq $AliceProfile) { $BobProfile } else { $AliceProfile }
-        [void](Invoke-Client 'cold-original-full-batch-replay' $profile (@('group','flush','--group',$group,'--conversation',(Peer-Conversation $profile $peer))+$networkArgs))
-        $empty = Sync 'post-replay-empty-mailbox' $profile
+        if (-not $DeliveryOnly) {
+            [void](Invoke-Client 'cold-original-full-batch-replay' $profile (@('group','flush','--group',$group,'--conversation',(Peer-Conversation $profile $peer))+$networkArgs))
+        }
+        $emptyPhase = if ($DeliveryOnly) { 'post-delivery-empty-mailbox' } else { 'post-replay-empty-mailbox' }
+        $empty = Sync $emptyPhase $profile
         Require ($empty.processed -eq 0) 'Durably ACKed fanout reappeared.'
-        $again = Invoke-Client 'post-replay-deduplicated-history' $profile @('group','messages','--group',$group)
+        $historyPhase = if ($DeliveryOnly) { 'post-delivery-deduplicated-history' } else { 'post-replay-deduplicated-history' }
+        $again = Invoke-Client $historyPhase $profile @('group','messages','--group',$group)
         Require (@($again.items).Count -eq 3*($SteadyStateRound+1)) 'Fanout replay duplicated history.'
     }
+    if (-not $DeliveryOnly) {
     [void](Invoke-Client 'owner-cold-control-receipt-reverification' $AliceProfile (@('group','publish','--group',$group)+$networkArgs))
     foreach ($profile in @($BobProfile,$CarolProfile)) {
         $emptyControl = Invoke-Client 'cold-control-cursor-empty-replay' $profile (@('group','sync','--group',$group,'--conversation',(Peer-Conversation $AliceProfile $profile))+$networkArgs)
         Require ($emptyControl.status -ceq 'synced' -and $emptyControl.completed -eq 0) 'Control cursor replay did not remain empty.'
+    }
     }
     if ($strictCommands) { Require (@($steps | Where-Object { $_.exit -ne 0 -or $_.attempt -ne 1 }).Count -eq 0) 'First-attempt run contains a retry or failed command.' }
     $passed = $true
@@ -321,7 +331,7 @@ try {
     [ordered]@{schema='deep.cli.connected-gsr-e2e.v1';passed=$passed;startedUtc=$started;finishedUtc=[DateTime]::UtcNow;
         automaticStoreResumes=$storeResumes;automaticMailboxResumes=$mailboxResumes;automaticLeaseWaits=$leaseWaits;noOwnedUnknownRecovery=($storeResumes -eq 0 -and $mailboxResumes -eq 0);
         runtimeSha256=$runtimeHash;scenarioSha256=$scenarioHash.ToLowerInvariant();sessionModuleSha256=$sessionModuleHash.ToLowerInvariant();sessionCloseFailed=$sessionCloseFailed;steps=@($steps.ToArray());
-        candidateAccounts=3;devicesPerAccount=1;persistentSessions=[bool]$PersistentSessions;groupRevision=$GroupRevision;steadyStateRound=$SteadyStateRound;reusedPublishedAccounts=[bool]$ReusePublishedAccounts;maximumExactAttempts=$(if($strictCommands){1}else{2});firstAttemptRequired=($strictCommands -and -not $RecoverIncompleteSteadyRound);recoveryRequired=[bool]$RecoverIncompleteSteadyRound;recoveryQualified=($passed -and $RecoverIncompleteSteadyRound);gsr1FunctionalQualified=($passed -and $SteadyStateRound -eq 0);steadyStateQualified=($passed -and $SteadyStateRound -gt 0 -and -not $RecoverIncompleteSteadyRound);gsr1RetentionQualified=$false;devicesQualified=$false;releaseQualified=$false} |
+        candidateAccounts=3;devicesPerAccount=1;persistentSessions=[bool]$PersistentSessions;groupRevision=$GroupRevision;steadyStateRound=$SteadyStateRound;reusedPublishedAccounts=[bool]$ReusePublishedAccounts;maximumExactAttempts=$(if($strictCommands){1}else{2});firstAttemptRequired=($strictCommands -and -not $RecoverIncompleteSteadyRound);recoveryRequired=[bool]$RecoverIncompleteSteadyRound;recoveryQualified=($passed -and $RecoverIncompleteSteadyRound);deliveryOnly=[bool]$DeliveryOnly;deliveryLatencyQualified=($passed -and $DeliveryOnly);gsr1FunctionalQualified=($passed -and $SteadyStateRound -eq 0);steadyStateQualified=($passed -and $SteadyStateRound -gt 0 -and -not $RecoverIncompleteSteadyRound -and -not $DeliveryOnly);gsr1RetentionQualified=$false;devicesQualified=$false;releaseQualified=$false} |
         ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $run 'receipt.json') -Encoding utf8
     Write-Host ([pscustomobject]@{passed=$passed;commands=$steps.Count} | ConvertTo-Json -Compress)
     if($sessionCloseFailed) { throw 'Session close failed; run remains unqualified.' }
