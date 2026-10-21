@@ -6,6 +6,11 @@ $scenario = Join-Path $PSScriptRoot 'Invoke-ThreeClientGsrE2E.ps1'
 $tokens = $null; $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($scenario, [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw 'Scenario syntax errors.' }
+$round = @($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -ceq 'SteadyStateRound' })
+$range = @($round.Attributes | Where-Object { $_.TypeName.Name -ceq 'ValidateRange' })
+if ($round.Count -ne 1 -or $range.Count -ne 1 -or
+    $range[0].PositionalArguments[0].SafeGetValue() -ne 0 -or
+    $range[0].PositionalArguments[1].SafeGetValue() -ne 63) { throw 'Retained diagnostic round range changed.' }
 $parameter = @($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -ceq 'DeliveryOnly' })
 if ($parameter.Count -ne 1 -or $null -ne $parameter[0].DefaultValue -or
     $parameter[0].StaticType -ne [Management.Automation.SwitchParameter]) { throw 'Delivery-only must remain explicit and disabled by default.' }
@@ -27,4 +32,4 @@ foreach ($case in $cases) {
     } catch { $failure = $_.Exception.Message }
     if ($failure -cne $expected) { throw 'Invalid scope did not reject before bootstrap/profile access.' }
 }
-[pscustomobject]@{passed=$true;scopeChecks=5;edition=$PSVersionTable.PSEdition;version=$PSVersionTable.PSVersion.ToString()} | ConvertTo-Json -Compress
+[pscustomobject]@{passed=$true;scopeChecks=6;edition=$PSVersionTable.PSEdition;version=$PSVersionTable.PSVersion.ToString()} | ConvertTo-Json -Compress

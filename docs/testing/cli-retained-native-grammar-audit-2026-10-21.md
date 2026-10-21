@@ -453,6 +453,13 @@ Another full run would grow history again, not make these samples controlled.
 The measured SAME-history SQL replay improvement remains10.8%; required1–2s
 delivery and removal of the main ONION/native/history amplification are OPEN.
 
+Subsequent [issuer-journal attribution](cli-fanout-grant-attribution-2026-10-21.md)
+identified the extra six full30 fanout requests as six necessary new Deposit
+grants: every prior exact-scope grant was already expired. They were not
+duplicate Store requests. The later report separately qualifies suppression of
+unproductive live renewal at an unchanged current issuance ceiling; it does not
+relabel full30's expired-grant acquisitions as avoidable.
+
 Qualified source commits: xnode95b9d43 +6837168; DevOps8f666d8 +862ba33;
 Shared d9ebdd4 +2ae51d8. No Windows/Android client or production node was changed.
 No crypto/time-policy relaxation, native floor/profile replacement, account

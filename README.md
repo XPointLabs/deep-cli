@@ -336,6 +336,10 @@ round, never replaced by a new command. Invalid scope combinations reject before
 opening a profile/network. Check these guards with
 `pwsh -NoProfile -File eng/Test-ThreeClientGsrScopes.ps1`.
 
+The retained diagnostic driver accepts round ordinals0–63 so later measurements
+can use the SAME profiles after round31. This is only a harness ordinal bound;
+no native journal, mailbox quota, signed lifetime or runtime capacity is raised.
+
 ## Persistent CLI sessions
 
 `deep session run --profile <alias> --network <hex> --bootstrap <public-bundle>

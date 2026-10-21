@@ -8,7 +8,7 @@ param(
     [switch]$PersistentSessions,
     [switch]$RecoverIncompleteSteadyRound,
     [switch]$DeliveryOnly,
-    [ValidateRange(0,31)][int]$SteadyStateRound = 0,
+    [ValidateRange(0,63)][int]$SteadyStateRound = 0,
     [ValidateRange(0,31)][int]$GroupRevision = 0,
     [ValidatePattern('^[a-z][a-z0-9-]{0,31}$')][string]$AliceProfile = 'cli-gsr-alice',
     [ValidatePattern('^[a-z][a-z0-9-]{0,31}$')][string]$BobProfile = 'cli-gsr-bob',
