@@ -32,4 +32,15 @@ foreach ($case in $cases) {
     } catch { $failure = $_.Exception.Message }
     if ($failure -cne $expected) { throw 'Invalid scope did not reject before bootstrap/profile access.' }
 }
-[pscustomobject]@{passed=$true;scopeChecks=6;edition=$PSVersionTable.PSEdition;version=$PSVersionTable.PSVersion.ToString()} | ConvertTo-Json -Compress
+$published = @($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -ceq 'ExecutablePath' })
+if ($published.Count -ne 1 -or $null -ne $published[0].DefaultValue) { throw 'Published runtime selection must remain explicit.' }
+$failure = $null
+try {
+    & $scenario -ExecutablePath (Join-Path $PSScriptRoot '../src/Deep.Cli/bin/Release/net10.0-windows/deep.exe') `
+        -BootstrapDirectory '__scope_test_missing_bootstrap__' -RegistryOrigin 'https://localhost/' `
+        -RunDirectory (Join-Path $PSScriptRoot '../artifacts/__scope_test_never_create__')
+} catch { $failure = $_.Exception.Message }
+if ($failure -cne 'Published executable must be an existing deep.exe inside this CLI repository artifacts directory.') {
+    throw 'Explicit published executable escaped the artifacts boundary or accessed bootstrap.'
+}
+[pscustomobject]@{passed=$true;scopeChecks=8;edition=$PSVersionTable.PSEdition;version=$PSVersionTable.PSVersion.ToString()} | ConvertTo-Json -Compress

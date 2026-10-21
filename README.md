@@ -36,6 +36,25 @@ dotnet build Deep.Cli.slnx --configuration Release
 dotnet run --project src/Deep.Cli --no-build --configuration Release -- --help
 ```
 
+For cold-command latency measurements, publish the same CLI graph with the
+explicit `Latency` profile and the actual Windows host RID, for example:
+
+```powershell
+dotnet publish src/Deep.Cli/Deep.Cli.csproj -c Release -r win-arm64 --self-contained false -p:PublishProfile=Latency -o artifacts/latency-publish
+```
+
+This uses [ReadyToRun](https://learn.microsoft.com/dotnet/core/deploying/ready-to-run)
+to move some JIT work to publish time. It adds no authority/state cache, trimming,
+native-source rebuild or alternate business path. It is an explicit larger
+host-specific CLI artifact, not a Windows/Android UI build. The ordinary build
+remains available for the fast edit loop. Report published and ordinary-build
+timings separately; ReadyToRun is not a claim that network or ACK delays are solved.
+`Invoke-ThreeClientGsrE2E.ps1 -ExecutablePath <absolute published deep.exe>`
+selects an existing publish output only beneath this repository's `artifacts`.
+It retains the same runtime archive/fingerprint and full scenario checks; the
+default still uses the ordinary Release build. Never overwrite either runtime
+or change scenario inputs during a run.
+
 Account commands:
 
 ```text

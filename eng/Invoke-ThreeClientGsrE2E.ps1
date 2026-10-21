@@ -3,6 +3,7 @@ param(
     [Parameter(Mandatory)][string]$BootstrapDirectory,
     [Parameter(Mandatory)][string]$RegistryOrigin,
     [Parameter(Mandatory)][string]$RunDirectory,
+    [string]$ExecutablePath,
     [switch]$ReusePublishedAccounts,
     [switch]$RequireFirstAttempt,
     [switch]$PersistentSessions,
@@ -32,6 +33,13 @@ $exe = Join-Path $repo 'src/Deep.Cli/bin/Release/net10.0-windows/deep.exe'
 $run = [IO.Path]::GetFullPath($RunDirectory)
 $artifactRoot = [IO.Path]::GetFullPath((Join-Path $repo 'artifacts')) + [IO.Path]::DirectorySeparatorChar
 if (-not $run.StartsWith($artifactRoot, [StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $run) -or @($AliceProfile,$BobProfile,$CarolProfile | Select-Object -Unique).Count -ne 3) { throw 'Fresh artifact directory and distinct isolated profiles required.' }
+if ($PSBoundParameters.ContainsKey('ExecutablePath')) {
+    $exe = [IO.Path]::GetFullPath($ExecutablePath)
+    if (-not $exe.StartsWith($artifactRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        [IO.Path]::GetFileName($exe) -cne 'deep.exe' -or -not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+        throw 'Published executable must be an existing deep.exe inside this CLI repository artifacts directory.'
+    }
+}
 foreach ($path in @($run, $BootstrapDirectory, $exe)) {
     for ($cursor = [IO.Path]::GetFullPath($path); $cursor; $cursor = [IO.Path]::GetDirectoryName($cursor)) {
         if ((Test-Path -LiteralPath $cursor) -and ((Get-Item -LiteralPath $cursor).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Reparse path rejected.' }
