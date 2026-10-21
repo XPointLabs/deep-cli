@@ -1,5 +1,10 @@
 # Retained NTS quorum and ACK — 2026-10-21
 
+Historical **pre-activation** evidence. Installed redundancy and the subsequent
+retained CLI rounds are documented in the
+[activation checkpoint](cli-nts-activation-ack-2026-10-21.md); the two-source
+deployment and unfinished-activation statements below describe this earlier run.
+
 Continues the [grant attribution checkpoint](cli-fanout-grant-attribution-2026-10-21.md).
 Same three CLI profiles and group, retained node volumes/keys/history. No reset,
 rekey, replaced floor, production change or Windows/Android UI work.

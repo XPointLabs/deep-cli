@@ -3,6 +3,7 @@ param(
     [Parameter(Mandatory)][string]$BootstrapDirectory,
     [Parameter(Mandatory)][string]$RegistryOrigin,
     [Parameter(Mandatory)][string]$RunDirectory,
+    [string]$ExecutablePath,
     [Parameter(Mandatory)][ValidatePattern('^[a-z][a-z0-9-]{0,31}$')][string]$PublisherProfile,
     [Parameter(Mandatory)][ValidateCount(1,8)][string[]]$RecipientProfiles,
     [switch]$Reintroduce
@@ -13,6 +14,13 @@ $repo=Split-Path $PSScriptRoot -Parent
 $exe=Join-Path $repo 'src/Deep.Cli/bin/Release/net10.0-windows/deep.exe'
 $run=[IO.Path]::GetFullPath($RunDirectory)
 $artifactRoot=[IO.Path]::GetFullPath((Join-Path $repo 'artifacts'))+[IO.Path]::DirectorySeparatorChar
+if($PSBoundParameters.ContainsKey('ExecutablePath')) {
+    $exe=[IO.Path]::GetFullPath($ExecutablePath)
+    if(-not $exe.StartsWith($artifactRoot,[StringComparison]::OrdinalIgnoreCase) -or
+        [IO.Path]::GetFileName($exe) -cne 'deep.exe' -or -not(Test-Path -LiteralPath $exe -PathType Leaf)) {
+        throw 'Published repair executable must be an existing deep.exe inside this CLI repository artifacts directory.'
+    }
+}
 if(-not $run.StartsWith($artifactRoot,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $run) -or
     @($RecipientProfiles|Where-Object {$_ -cnotmatch '^[a-z][a-z0-9-]{0,31}$' -or $_ -ceq $PublisherProfile}).Count -or
     @($RecipientProfiles|Select-Object -Unique).Count -ne $RecipientProfiles.Count){throw 'Fresh owned artifact directory and distinct isolated profiles required.'}

@@ -43,4 +43,15 @@ try {
 if ($failure -cne 'Published executable must be an existing deep.exe inside this CLI repository artifacts directory.') {
     throw 'Explicit published executable escaped the artifacts boundary or accessed bootstrap.'
 }
-[pscustomobject]@{passed=$true;scopeChecks=8;edition=$PSVersionTable.PSEdition;version=$PSVersionTable.PSVersion.ToString()} | ConvertTo-Json -Compress
+$repair = Join-Path $PSScriptRoot 'Invoke-ContactRouteRepair.ps1'
+$failure = $null
+try {
+    & $repair -ExecutablePath (Join-Path $PSScriptRoot '../src/Deep.Cli/bin/Release/net10.0-windows/deep.exe') `
+        -BootstrapDirectory '__scope_test_missing_bootstrap__' -RegistryOrigin 'https://localhost/' `
+        -RunDirectory (Join-Path $PSScriptRoot '../artifacts/__scope_test_never_create__') `
+        -PublisherProfile 'cli-scope-a' -RecipientProfiles 'cli-scope-b'
+} catch { $failure = $_.Exception.Message }
+if ($failure -cne 'Published repair executable must be an existing deep.exe inside this CLI repository artifacts directory.') {
+    throw 'Explicit repair executable escaped artifacts or accessed bootstrap/profile state.'
+}
+[pscustomobject]@{passed=$true;scopeChecks=9;edition=$PSVersionTable.PSEdition;version=$PSVersionTable.PSVersion.ToString()} | ConvertTo-Json -Compress
