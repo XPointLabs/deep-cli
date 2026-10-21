@@ -1,5 +1,9 @@
 # Retained NTS activation and ACK — 2026-10-21
 
+Historical activation/strict37 baseline. The subsequent
+[regression investigation](cli-authority-regression-2026-10-21.md) identifies
+unused application-store integrity scans and measures the retained correction.
+
 Continues the [pre-activation checkpoint](cli-nts-quorum-ack-2026-10-21.md).
 Only the retained local `deep-dev-current` contour and the same three CLI
 profiles/group are in scope. Windows/Android applications and production were
