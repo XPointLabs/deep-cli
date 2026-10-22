@@ -15,14 +15,14 @@ $parameter = @($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.
 if ($parameter.Count -ne 1 -or $null -ne $parameter[0].DefaultValue -or
     $parameter[0].StaticType -ne [Management.Automation.SwitchParameter]) { throw 'Delivery-only must remain explicit and disabled by default.' }
 $source = Get-Content -LiteralPath $scenario -Raw
-if (-not $source.Contains('deliveryLatencyQualified=($passed -and $DeliveryOnly)') -or
+if (-not $source.Contains('deliveryLatencyQualified=($passed -and $DeliveryOnly -and -not $RecoverIncompleteSteadyRound)') -or
+    -not $source.Contains('recoveryDeliveryQualified=($passed -and $RecoverIncompleteSteadyRound -and $DeliveryOnly)') -or
     -not $source.Contains('steadyStateQualified=($passed -and $SteadyStateRound -gt 0 -and -not $RecoverIncompleteSteadyRound -and -not $DeliveryOnly)')) {
     throw 'Delivery-only cannot qualify the full steady-state lane.'
 }
-$expected = 'Delivery-only requires a new retained steady round; recovery and full lifecycle qualification remain separate.'
+$expected = 'Delivery-only requires retained steady accounts; recovery is never first-attempt or full qualification.'
 $cases = @(
     @{SteadyStateRound=0; ReusePublishedAccounts=$true},
-    @{SteadyStateRound=1; ReusePublishedAccounts=$true; RecoverIncompleteSteadyRound=$true},
     @{SteadyStateRound=0; ReusePublishedAccounts=$true; RequireFirstAttempt=$true}
 )
 foreach ($case in $cases) {
@@ -31,6 +31,14 @@ foreach ($case in $cases) {
         & $scenario -DeliveryOnly @case -BootstrapDirectory '__scope_test_missing_bootstrap__' -RegistryOrigin 'https://localhost/' -RunDirectory '__scope_test_never_create__'
     } catch { $failure = $_.Exception.Message }
     if ($failure -cne $expected) { throw 'Invalid scope did not reject before bootstrap/profile access.' }
+}
+$failure = $null
+try {
+    & $scenario -DeliveryOnly -RecoverIncompleteSteadyRound -SteadyStateRound 1 -ReusePublishedAccounts `
+        -BootstrapDirectory '__scope_test_missing_bootstrap__' -RegistryOrigin 'https://localhost/' -RunDirectory '__scope_test_never_create__'
+} catch { $failure = $_.Exception.Message }
+if ($failure -cne 'Fresh artifact directory and distinct isolated profiles required.') {
+    throw 'Explicit delivery recovery did not reach the artifact guard before bootstrap/profile access.'
 }
 $published = @($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -ceq 'ExecutablePath' })
 if ($published.Count -ne 1 -or $null -ne $published[0].DefaultValue) { throw 'Published runtime selection must remain explicit.' }

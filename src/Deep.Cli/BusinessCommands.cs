@@ -83,7 +83,7 @@ internal static class BusinessCommands
                 ("attachment", "send") => "AttachmentSend",
                 ("attachment", "queue") => "AttachmentQueue",
                 ("attachment", "download") => "AttachmentDownload",
-                ("group", "create" or "invite" or "accept" or "advance" or "send" or "flush" or "sync" or "publish") => "GroupWork",
+                ("group", "create" or "invite" or "accept" or "advance" or "send" or "flush" or "resume" or "sync" or "publish") => "GroupWork",
                 _ => throw new ArgumentException("Unsupported business operation.")
             };
             if (phase == "NetworkVerify")
@@ -105,6 +105,7 @@ internal static class BusinessCommands
                     "advance" => await accounts.AdvanceGroupAsync(group, conversation!, source, ct),
                     "send" => await accounts.SendGroupTextAsync(group, conversation!, command.Text!, source, ct),
                     "flush" => await accounts.FlushGroupAsync(group, conversation!, source, ct),
+                    "resume" => await accounts.ResumeGroupAsync(group, conversation!, source, ct),
                     "publish" => await accounts.PublishGroupControlAsync(group, source, ct),
                     "sync" => await accounts.SyncGroupControlAsync(group, conversation!, source, ct),
                     _ => throw new ArgumentException("Unsupported group operation.")

@@ -24,7 +24,7 @@ public sealed class GroupCommandTests
     [Fact]
     public void CompositeGroupBatchHasABoundedHostBudgetWithoutExtendingSingleHopAuthority()
     {
-        foreach (var action in new[] { "invite", "accept", "advance", "send", "flush", "sync", "publish" })
+        foreach (var action in new[] { "invite", "accept", "advance", "send", "flush", "resume", "sync", "publish" })
             Assert.Equal(TimeSpan.FromMinutes(30), Program.TimeoutFor(["group", action]));
         Assert.Equal(TimeSpan.FromMinutes(5), Program.TimeoutFor(["group", "create"]));
         Assert.Equal(TimeSpan.FromMinutes(5), Program.TimeoutFor(["mailbox", "sync"]));
@@ -36,7 +36,7 @@ public sealed class GroupCommandTests
         Assert.Equal("list", CommandLine.Parse(["group", "list", .. Local]).Operation);
         Assert.Equal(Id, CommandLine.Parse(["group", "messages", .. Local, "--group", Id]).Group);
         Assert.Equal("Group QA", CommandLine.Parse(["group", "create", .. Online, "--name", "Group QA"]).Name);
-        foreach (var action in new[] { "invite", "accept", "advance", "flush", "sync" })
+        foreach (var action in new[] { "invite", "accept", "advance", "flush", "resume", "sync" })
         {
             Assert.Equal(Id, CommandLine.Parse(["group", action, .. Online, "--group", Id, "--conversation", Id]).Group);
             Assert.Throws<ArgumentException>(() => CommandLine.Parse(["group", action, .. Online, "--group", Id]));

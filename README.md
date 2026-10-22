@@ -18,6 +18,11 @@ Build the solution with its explicit owned Shared/Protocol projects. A Release
 console with Debug dependencies is not a Release runtime: tests inspect all
 four actual dependency optimizer flags and reject a mixed graph. New group send
 drains unfinished work; explicit `group flush` still audits all original Stores.
+`group resume` uses that same owned pending-only path without authoring a new
+message. It does not qualify completed-archive integrity; `flush` keeps that
+separate explicit verification. A retained `-DeliveryOnly
+-RecoverIncompleteSteadyRound` scenario qualifies delivery recovery only, never
+first-attempt latency, full history/lifecycle, device or release acceptance.
 The E2E receipt records `completedBatchItems` to distinguish these operations.
 Before an independent network/contact/mailbox operation, the serial host
 discards only uncaptured public working reads. Established text, attachment and

@@ -23,8 +23,8 @@ if ($SteadyStateRound -gt 0 -and (-not $ReusePublishedAccounts -or $RequireFirst
 if ($RecoverIncompleteSteadyRound -and ($SteadyStateRound -eq 0 -or -not $ReusePublishedAccounts -or $RequireFirstAttempt)) {
     throw 'Recovery requires an explicit incomplete retained steady round; it can never qualify first attempt.'
 }
-if ($DeliveryOnly -and ($SteadyStateRound -eq 0 -or -not $ReusePublishedAccounts -or $RecoverIncompleteSteadyRound -or $RequireFirstAttempt)) {
-    throw 'Delivery-only requires a new retained steady round; recovery and full lifecycle qualification remain separate.'
+if ($DeliveryOnly -and ($SteadyStateRound -eq 0 -or -not $ReusePublishedAccounts -or $RequireFirstAttempt)) {
+    throw 'Delivery-only requires retained steady accounts; recovery is never first-attempt or full qualification.'
 }
 $strictCommands = $RequireFirstAttempt -or $SteadyStateRound -gt 0
 $messagePrefix = if ($SteadyStateRound -gt 0) { 'Three CLI round '+($SteadyStateRound+1)+' ' } else { 'Three CLI ' }
@@ -81,7 +81,7 @@ function Require([bool]$ok, [string]$label) { if (-not $ok) { throw $label } }
 function Invoke-Client([string]$phase, [string]$profile, [string[]]$command, [int]$attempt = 1) {
     Require-ScenarioInputs
     Require ((Runtime-Fingerprint) -ceq $runtimeHash -and (Get-FileHash -LiteralPath $scenarioPath -Algorithm SHA256).Hash -ceq $scenarioHash) 'Scenario inputs changed.'
-    $budget = if ($command[0] -ceq 'group' -and $command[1] -in @('invite','accept','advance','send','flush','sync','publish')) { 1830000 } else { 330000 }
+    $budget = if ($command[0] -ceq 'group' -and $command[1] -in @('invite','accept','advance','send','flush','resume','sync','publish')) { 1830000 } else { 330000 }
     $watch = [Diagnostics.Stopwatch]::StartNew()
     $process = $null
     try {
@@ -115,7 +115,7 @@ function Invoke-Client([string]$phase, [string]$profile, [string[]]$command, [in
         if ($metrics.PSObject.Properties.Name -contains 'protectionWork') { $row | Add-Member protectionWork $metrics.protectionWork }
         if ($metrics.PSObject.Properties.Name -contains 'sessionWork') { $row | Add-Member sessionWork $metrics.sessionWork }
         if ($metrics.PSObject.Properties.Name -contains 'recoveryWork') { $row | Add-Member recoveryWork $metrics.recoveryWork }
-        if ($exitCode -eq 0 -and $command[0] -ceq 'group' -and $command[1] -in @('send','flush')) {
+        if ($exitCode -eq 0 -and $command[0] -ceq 'group' -and $command[1] -in @('send','flush','resume')) {
             Require ($metrics.completed -ge 0 -and $metrics.completed -le 512) 'Group work count exceeds its closed batch bound.'
             $row | Add-Member completedBatchItems $metrics.completed
         }
@@ -299,7 +299,11 @@ try {
                 Require ($copies.Count -le 1) 'Retained semantic history duplicated.'
                 if ($copies.Count -ne 1) { $receivedByAll = $false }
             }
-            if (-not $receivedByAll) { [void](Invoke-Client 'resume-original-two-target-batch' $sender (@('group','flush')+$argsGroup)) }
+            # Even a delivered semantic copy cannot settle an unknown sender
+            # outcome. Resume pending work on ALL original senders; completed
+            # hints skip work only, never supply a Store receipt or permission.
+            if ($RecoverIncompleteSteadyRound) { [void](Invoke-Client 'resume-original-two-target-batch' $sender (@('group','resume')+$argsGroup)) }
+            elseif (-not $receivedByAll) { [void](Invoke-Client 'resume-original-two-target-batch' $sender (@('group','flush')+$argsGroup)) }
         }
         foreach ($recipient in $profiles | Where-Object { $_ -cne $sender }) { [void](Sync 'fanout-recipient-native-receive-ack' $recipient) }
     }
@@ -340,7 +344,7 @@ try {
     [ordered]@{schema='deep.cli.connected-gsr-e2e.v1';passed=$passed;startedUtc=$started;finishedUtc=[DateTime]::UtcNow;
         automaticStoreResumes=$storeResumes;automaticMailboxResumes=$mailboxResumes;automaticLeaseWaits=$leaseWaits;noOwnedUnknownRecovery=($storeResumes -eq 0 -and $mailboxResumes -eq 0);
         runtimeSha256=$runtimeHash;scenarioSha256=$scenarioHash.ToLowerInvariant();sessionModuleSha256=$sessionModuleHash.ToLowerInvariant();sessionCloseFailed=$sessionCloseFailed;steps=@($steps.ToArray());
-        candidateAccounts=3;devicesPerAccount=1;persistentSessions=[bool]$PersistentSessions;groupRevision=$GroupRevision;steadyStateRound=$SteadyStateRound;reusedPublishedAccounts=[bool]$ReusePublishedAccounts;maximumExactAttempts=$(if($strictCommands){1}else{2});firstAttemptRequired=($strictCommands -and -not $RecoverIncompleteSteadyRound);recoveryRequired=[bool]$RecoverIncompleteSteadyRound;recoveryQualified=($passed -and $RecoverIncompleteSteadyRound);deliveryOnly=[bool]$DeliveryOnly;deliveryLatencyQualified=($passed -and $DeliveryOnly);gsr1FunctionalQualified=($passed -and $SteadyStateRound -eq 0);steadyStateQualified=($passed -and $SteadyStateRound -gt 0 -and -not $RecoverIncompleteSteadyRound -and -not $DeliveryOnly);gsr1RetentionQualified=$false;devicesQualified=$false;releaseQualified=$false} |
+        candidateAccounts=3;devicesPerAccount=1;persistentSessions=[bool]$PersistentSessions;groupRevision=$GroupRevision;steadyStateRound=$SteadyStateRound;reusedPublishedAccounts=[bool]$ReusePublishedAccounts;maximumExactAttempts=$(if($strictCommands){1}else{2});firstAttemptRequired=($strictCommands -and -not $RecoverIncompleteSteadyRound);recoveryRequired=[bool]$RecoverIncompleteSteadyRound;recoveryQualified=($passed -and $RecoverIncompleteSteadyRound -and -not $DeliveryOnly);recoveryDeliveryQualified=($passed -and $RecoverIncompleteSteadyRound -and $DeliveryOnly);deliveryOnly=[bool]$DeliveryOnly;deliveryLatencyQualified=($passed -and $DeliveryOnly -and -not $RecoverIncompleteSteadyRound);gsr1FunctionalQualified=($passed -and $SteadyStateRound -eq 0);steadyStateQualified=($passed -and $SteadyStateRound -gt 0 -and -not $RecoverIncompleteSteadyRound -and -not $DeliveryOnly);gsr1RetentionQualified=$false;devicesQualified=$false;releaseQualified=$false} |
         ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $run 'receipt.json') -Encoding utf8
     Write-Host ([pscustomobject]@{passed=$passed;commands=$steps.Count} | ConvertTo-Json -Compress)
     if($sessionCloseFailed) { throw 'Session close failed; run remains unqualified.' }

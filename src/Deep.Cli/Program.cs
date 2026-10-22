@@ -13,7 +13,7 @@ internal static class Program
     internal static TimeSpan TimeoutFor(string[] args) => args switch
     {
         ["attachment", "send" or "download", ..] => AttachmentTransferTimeout,
-        ["group", "invite" or "accept" or "advance" or "send" or "flush" or "sync" or "publish", ..] => GroupBatchTimeout,
+        ["group", "invite" or "accept" or "advance" or "send" or "flush" or "resume" or "sync" or "publish", ..] => GroupBatchTimeout,
         _ => CommandTimeout
     };
     private static async Task<int> Main(string[] args)
@@ -50,7 +50,7 @@ internal static class Program
             if (session is null && args is (["--help"] or []))
             {
                 await output.WriteLineAsync("deep <area> <command> --profile <alias> --network <32 lowercase hex> [options]\n" +
-                    "account create/status/address; network verify/refresh; contact request/accept/stop/list/operations/route-health/refresh-route/reintroduce-route; mailbox sync; message queue/send/list/pending; attachment prepare/queue/send/pending/operations/list/download; group create/invite/accept/advance/send/flush/list/messages\n" +
+                    "account create/status/address; network verify/refresh; contact request/accept/stop/list/operations/route-health/refresh-route/reintroduce-route; mailbox sync; message queue/send/list/pending; attachment prepare/queue/send/pending/operations/list/download; group create/invite/accept/advance/send/resume/flush/list/messages\n" +
                     "Network operations require --bootstrap <public dev bundle> --registry <canonical HTTPS origin>.\n" +
                     "request: --address --operation; accept: --conversation --operation; queue: --conversation --text; send: --conversation --operation --text.\n" +
                     "session run: bounded JSON argument arrays on stdin; one bound profile/network/bootstrap/origin, serial commands until EOF.\n" +
