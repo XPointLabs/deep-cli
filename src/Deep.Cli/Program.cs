@@ -35,6 +35,7 @@ internal static class Program
     {
         using var work = ProtectionWork.Begin();
         using var networkWork = new NetworkWork();
+        using var persistenceWork = new PersistenceWork();
         var runtimeWork = new RuntimeWork();
         DeepIdV2AccountService? recoveryAccount = null;
         long initialStore = 0, initialMailbox = 0, initialWaits = 0;
@@ -76,6 +77,7 @@ internal static class Program
                 encoded["protectionWork"] = JsonSerializer.SerializeToNode(work.Snapshot());
                 encoded["networkWork"] = JsonSerializer.SerializeToNode(networkWork.Snapshot());
                 encoded["runtimeWork"] = JsonSerializer.SerializeToNode(runtimeWork.Snapshot());
+                encoded["persistenceWork"] = JsonSerializer.SerializeToNode(persistenceWork.Snapshot());
                 encoded["recoveryWork"] = JsonSerializer.SerializeToNode(RecoverySnapshot());
                 if (session is not null) encoded["sessionWork"] = JsonSerializer.SerializeToNode(session.Snapshot());
                 await output.WriteLineAsync(encoded.ToJsonString());

@@ -5,6 +5,17 @@ namespace Deep.Cli.Tests;
 public sealed class BusinessCommandTests
 {
     [Theory]
+    [InlineData(429, "DirectoryRateLimited")]
+    [InlineData(503, "DirectoryUnavailable")]
+    public void DirectoryDiagnosticsDistinguishOnlyClosedHttpStates(int status, string expected)
+    {
+        var error = new Deep.Client.Shared.Services.AccountDirectoryV2.DeepIdV2DirectoryProofUnavailableException(
+            (System.Net.HttpStatusCode)status, TimeSpan.FromSeconds(1));
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(new CliBusinessException("MailboxSync", error).ClosedDiagnostic()));
+        Assert.Equal(expected, json.RootElement.GetProperty("causes")[0].GetProperty("category").GetString());
+        Assert.DoesNotContain("RetryAfter", json.RootElement.GetRawText());
+    }
+    [Theory]
     [InlineData("RouteExpiry", "GrantRouteExpiry")]
     [InlineData("Issuer", "GrantIssuer")]
     [InlineData("DO-NOT-EXPORT", "Unclassified")]

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using Deep.Client.Shared.Services;
+using Deep.Client.Shared.Services.AccountDirectoryV2;
 using Deep.Protocol.Identity;
 using Deep.Protocol.ApplicationCore;
 
@@ -181,6 +182,8 @@ internal sealed class CliBusinessException(string phase, Exception error) : Exce
                 TimeoutException => "Timeout",
                 CryptographicException => "ProtectedState",
                 HttpRequestException => "HttpFailure",
+                DeepIdV2DirectoryProofUnavailableException { StatusCode: System.Net.HttpStatusCode.TooManyRequests } => "DirectoryRateLimited",
+                DeepIdV2DirectoryProofUnavailableException { StatusCode: System.Net.HttpStatusCode.ServiceUnavailable } => "DirectoryUnavailable",
                 IOException => "IoFailure",
                 InvalidDataException => "InvalidState",
                 OperationCanceledException => "Cancelled",
