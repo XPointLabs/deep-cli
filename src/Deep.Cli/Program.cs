@@ -102,7 +102,7 @@ internal static class Program
         catch (OperationCanceledException) { return await FailAsync(error, "cancelled", 130); }
         catch (CliBusinessException failure)
         {
-            await error.WriteLineAsync(JsonSerializer.Serialize(new { status = "error", code = "business-operation-failed", diagnostic = failure.ClosedDiagnostic(), protectionWork = work.Snapshot(), networkWork = networkWork.Snapshot(), runtimeWork = runtimeWork.Snapshot(), recoveryWork = RecoverySnapshot() }));
+            await error.WriteLineAsync(JsonSerializer.Serialize(new { status = "error", code = "business-operation-failed", diagnostic = failure.ClosedDiagnostic(), protectionWork = work.Snapshot(), networkWork = networkWork.Snapshot(), runtimeWork = runtimeWork.Snapshot(), persistenceWork = persistenceWork.Snapshot(), recoveryWork = RecoverySnapshot(), sessionWork = session?.Snapshot() }));
             return ct.IsCancellationRequested ? 130 : 6;
         }
         catch (ArgumentException) { return await FailAsync(error, "invalid-arguments", 2); }
