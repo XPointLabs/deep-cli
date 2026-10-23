@@ -245,6 +245,22 @@ completed offer whose original selector is no longer available. Receipts contain
 hashes/counts/closed phases only, not message IDs, manifests or source paths.
 See [attachment evidence](docs/testing/cli-attachments-2026-10-18.md).
 
+Pass `-ExecutablePath artifacts/<publish>/deep.exe` to test an immutable published
+runtime; the driver archives it and its scenario under the fresh run directory.
+The pair may have other contacts: only its unique common explicitly accepted
+conversation is selected. `-AssetRevision 1` explicitly starts a new QA asset
+namespace without resetting profiles. Retry an interrupted asset with the SAME
+revision, never advance it to evade pending/unknown work. Revision0 retains
+the original test selectors. `eng/Test-AttachmentScenario.ps1` checks the
+selection/identity and pre-I/O runtime guards without starting clients.
+Current full-group and retained-attachment evidence:
+[checkpoint](docs/testing/cli-full-retained-and-attachments-2026-10-23.md).
+This driver does not silently repair expired peer routes: retain the SAME asset
+and offer, perform the existing authenticated route-maintenance workflow, then
+retry. A maintenance-assisted recovery is reported separately from first-attempt
+delivery; proactive automatic route lifecycle remains an outstanding product
+requirement, not a reason to accept an expired XRA1.
+
 Logical operation IDs are nonzero **32 bytes /64 lowercase hex**; conversation
 IDs are32 bytes /64 hex. `queue` durably authors one message and returns its
 operation. `send` retries that exact operation/text, never queues a replacement.

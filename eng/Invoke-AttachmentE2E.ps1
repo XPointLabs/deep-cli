@@ -3,6 +3,8 @@ param(
     [Parameter(Mandatory)][string]$BootstrapDirectory,
     [Parameter(Mandatory)][string]$RegistryOrigin,
     [Parameter(Mandatory)][string]$RunDirectory,
+    [string]$ExecutablePath,
+    [ValidateRange(0,63)][int]$AssetRevision = 0,
     [ValidatePattern('^[a-z][a-z0-9-]{0,31}$')][string]$AliceProfile = 'cli-current-alice',
     [ValidatePattern('^[a-z][a-z0-9-]{0,31}$')][string]$BobProfile = 'cli-current-bob'
 )
@@ -14,6 +16,13 @@ $run = [IO.Path]::GetFullPath($RunDirectory)
 $artifactRoot = [IO.Path]::GetFullPath((Join-Path $repo 'artifacts')) + [IO.Path]::DirectorySeparatorChar
 if (-not $run.StartsWith($artifactRoot, [StringComparison]::OrdinalIgnoreCase) -or
     (Test-Path -LiteralPath $run) -or $AliceProfile -ceq $BobProfile) { throw 'Fresh artifact directory and distinct retained profiles required.' }
+if ($PSBoundParameters.ContainsKey('ExecutablePath')) {
+    $exe = [IO.Path]::GetFullPath($ExecutablePath)
+    if (-not $exe.StartsWith($artifactRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        [IO.Path]::GetFileName($exe) -cne 'deep.exe' -or -not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+        throw 'Published executable must be an existing deep.exe inside this CLI repository artifacts directory.'
+    }
+}
 foreach ($path in @($run, $BootstrapDirectory, $exe)) {
     for ($cursor = [IO.Path]::GetFullPath($path); $cursor; $cursor = [IO.Path]::GetDirectoryName($cursor)) {
         if ((Test-Path -LiteralPath $cursor) -and ((Get-Item -LiteralPath $cursor).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Reparse path rejected.' }
@@ -34,6 +43,10 @@ function Runtime-Fingerprint {
 }
 $runtimeHash = Runtime-Fingerprint
 [void](New-Item -ItemType Directory -Path $run)
+Copy-Item -LiteralPath $scenarioPath -Destination (Join-Path $run 'scenario.ps1')
+if ((Get-FileHash -LiteralPath (Join-Path $run 'scenario.ps1') -Algorithm SHA256).Hash -cne $scenarioHash) { throw 'Scenario archive differs.' }
+Compress-Archive -LiteralPath ([IO.Path]::GetDirectoryName($exe)) -DestinationPath (Join-Path $run 'runtime.zip') -CompressionLevel Fastest
+if ((Runtime-Fingerprint) -cne $runtimeHash) { throw 'Runtime changed during archive.' }
 $started = [DateTime]::UtcNow
 $steps = [Collections.Generic.List[object]]::new()
 $files = [Collections.Generic.List[object]]::new()
@@ -70,7 +83,25 @@ function Invoke-Client([string]$phase, [string]$profile, [string[]]$command, [sw
     } finally { $process.Dispose() }
 }
 function Operation([string]$purpose) {
-    [Convert]::ToHexStringLower([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes('Deep/CLI/AttachmentQA/20261018/'+$network+'/'+$AliceProfile+'/'+$BobProfile+'/'+$purpose)))
+    # Revision0 retains original deterministic identities. A new explicit
+    # revision is a new test asset, never a replacement for failed old work.
+    $revision = if ($AssetRevision -eq 0) { '' } else { '/revision-'+$AssetRevision }
+    [Convert]::ToHexStringLower([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes('Deep/CLI/AttachmentQA/20261018/'+$network+'/'+$AliceProfile+'/'+$BobProfile+$revision+'/'+$purpose)))
+}
+function Select-AcceptedAttachmentConversation($left, $right) {
+    $matches = @(foreach ($l in @($left.contacts)) {
+        foreach ($r in @($right.contacts)) {
+            if ($l.conversation -ceq $r.conversation) { [pscustomobject]@{left=$l;right=$r} }
+        }
+    })
+    if ($matches.Count -ne 1) { throw 'One unique common retained conversation required.' }
+    $pair = $matches[0]
+    if ($pair.left.conversation -cnotmatch '\A[0-9A-Fa-f]{64}\z' -or
+        -not (($pair.left.state -ceq 'PeerAcceptanceRetained' -and $pair.right.state -ceq 'LocalAcceptanceRetained') -or
+              ($pair.left.state -ceq 'LocalAcceptanceRetained' -and $pair.right.state -ceq 'PeerAcceptanceRetained'))) {
+        throw 'Retained pair is not explicitly accepted.'
+    }
+    return $pair.left.conversation
 }
 function Transfer([string]$label, [string]$sender, [string]$receiver, [string]$conversation, [byte[]]$content, [string]$name, [string]$media) {
     $input = Join-Path $run $name
@@ -117,18 +148,17 @@ $passed = $false
 try {
     $a = Invoke-Client 'alice-retained-contact' $AliceProfile @('contact','list')
     $b = Invoke-Client 'bob-retained-contact' $BobProfile @('contact','list')
-    Require (@($a.contacts).Count -eq 1 -and @($b.contacts).Count -eq 1) 'Exactly one retained contact per client required.'
-    Require ($a.contacts[0].conversation -ceq $b.contacts[0].conversation -and $a.contacts[0].state -ceq 'PeerAcceptanceRetained' -and $b.contacts[0].state -ceq 'LocalAcceptanceRetained') 'Retained pair is not explicitly accepted.'
+    $conversation = Select-AcceptedAttachmentConversation $a $b
     $data = [byte[]]::new(524325)
     for ($i = 0; $i -lt $data.Length; $i++) { $data[$i] = [byte](($i * 17 + 31) % 251) }
-    Transfer 'file-alice-to-bob' $AliceProfile $BobProfile $a.contacts[0].conversation $data 'qa-document.bin' 'application/octet-stream'
+    Transfer 'file-alice-to-bob' $AliceProfile $BobProfile $conversation $data 'qa-document.bin' 'application/octet-stream'
     $png = [Convert]::FromBase64String('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aE1sAAAAASUVORK5CYII=')
-    Transfer 'png-bob-to-alice' $BobProfile $AliceProfile $a.contacts[0].conversation $png 'qa-image.png' 'image/png'
+    Transfer 'png-bob-to-alice' $BobProfile $AliceProfile $conversation $png 'qa-image.png' 'image/png'
     Require (@(Get-ChildItem -LiteralPath $run -Filter '.deep-verified-download-*').Count -eq 0) 'Download staging file leaked.'
     $passed = $true
 } finally {
     $receipt = [ordered]@{schema='deep.cli.attachment-e2e.v1';passed=$passed;startedUtc=$started;finishedUtc=[DateTime]::UtcNow;
-        runtimeSha256=$runtimeHash;scenarioSha256=$scenarioHash.ToLowerInvariant();steps=@($steps.ToArray());files=@($files.ToArray());
+        runtimeSha256=$runtimeHash;scenarioSha256=$scenarioHash.ToLowerInvariant();assetRevision=$AssetRevision;steps=@($steps.ToArray());files=@($files.ToArray());
         groupsQualified=$false;devicesQualified=$false;releaseQualified=$false}
     $receipt | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $run 'receipt.json') -Encoding utf8
     Write-Host ([pscustomobject]@{passed=$passed;commands=$steps.Count;remoteFiles=$files.Count} | ConvertTo-Json -Compress)
