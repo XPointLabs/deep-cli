@@ -6,10 +6,12 @@ param(
     [string]$ExecutablePath,
     [Parameter(Mandatory)][ValidatePattern('^[a-z][a-z0-9-]{0,31}$')][string]$PublisherProfile,
     [Parameter(Mandatory)][ValidateCount(1,8)][string[]]$RecipientProfiles,
-    [switch]$Reintroduce
+    [switch]$Reintroduce,
+    [switch]$ConnectionCycle
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
+if($ConnectionCycle -and $Reintroduce){throw 'Connection cycle cannot import a re-introduction address.'}
 $repo=Split-Path $PSScriptRoot -Parent
 $exe=Join-Path $repo 'src/Deep.Cli/bin/Release/net10.0-windows/deep.exe'
 $run=[IO.Path]::GetFullPath($RunDirectory)
@@ -54,15 +56,88 @@ function Call([string]$phase,[string]$profile,[string[]]$arguments){
         (Get-FileHash -LiteralPath $module -Algorithm SHA256).Hash -cne $moduleHash){throw 'Repair inputs changed.'}
     if(-not $sessions.ContainsKey($profile)){$sessions[$profile]=New-CliSession $exe $profile $network $BootstrapDirectory $RegistryOrigin}
     $watch=[Diagnostics.Stopwatch]::StartNew()
-    $result=Invoke-CliSession $sessions[$profile] ($arguments+@('--profile',$profile,'--network',$network)) 330000
+    $budget=if($arguments[0] -ceq 'network' -and $arguments[1] -cin @('maintain','verify','publish')){1830000}else{330000}
+    $result=Invoke-CliSession $sessions[$profile] ($arguments+@('--profile',$profile,'--network',$network)) $budget
     $row=[ordered]@{phase=$phase;exit=$result.ExitCode;milliseconds=$watch.ElapsedMilliseconds;processorMilliseconds=$result.ProcessorMilliseconds;attempt=1}
-    foreach($field in @('networkWork','runtimeWork','recoveryWork')){if($result.Result.PSObject.Properties.Name -contains $field){$row[$field]=$result.Result.$field}}
+    foreach($field in @('networkWork','runtimeWork','recoveryWork','persistenceWork','sessionWork')){if($result.Result.PSObject.Properties.Name -contains $field){$row[$field]=$result.Result.$field}}
+    if($result.Result.PSObject.Properties.Name -contains 'maintenance'){$row['contactMaintenance']=$result.Result.maintenance}
     $steps.Add([pscustomobject]$row);[pscustomobject]$row|ConvertTo-Json -Depth 6 -Compress|Write-Host
     if($result.ExitCode -ne 0){$result.Result.diagnostic|ConvertTo-Json -Depth 10|Set-Content -LiteralPath (Join-Path $run ('failure-'+$steps.Count+'.json')) -Encoding utf8;throw 'Owned repair failed; original state retained.'}
     return $result.Result
 }
+function Require-ConnectionCycleResult($result,[int]$contacts,[bool]$quiescent=$false,[bool]$activation=$false,[int]$allowedDeferred=0){
+    $m=$result.maintenance
+    $statuses=if($activation){@('ok')}else{@('maintained','partial')}
+    if($result.status -cnotin $statuses -or $m.AcceptedContacts -ne $contacts -or
+        $m.ControlsStored -lt 0 -or $m.ControlsStored -gt $contacts -or
+        $m.DeferredContacts -lt 0 -or $m.DeferredContacts -gt $contacts -or
+        $m.Reintroductions -lt 0 -or $m.Reintroductions -gt $m.ControlsStored -or
+        $m.ControlsStored+$m.DeferredContacts-$m.Reintroductions -gt $contacts -or
+        $m.ProcessedEnvelopes -lt 0 -or $m.ProcessedEnvelopes -ne $m.DurableTombstones -or $m.HasMore){
+        throw 'Connection cycle did not complete its bounded owned work.'
+    }
+    if($activation -and (-not $result.networkVerified -or -not $result.contactPublished)){
+        throw 'Connection activation did not verify its own admission/publication.'
+    }
+    if(-not $activation -and (($result.status -ceq 'maintained') -ne ($m.DeferredContacts -eq 0))){
+        throw 'Connection cycle status disagrees with deferred contacts.'
+    }
+    if($quiescent -and ($result.status -cnotin @('maintained','partial') -or $m.ControlsStored -ne 0 -or
+        $m.Reintroductions -ne 0 -or $m.DeferredContacts -gt $allowedDeferred -or $m.ProcessedEnvelopes -ne 0)){
+        throw 'Connection cycle is not quiescent; no implicit repair or retry.'
+    }
+}
 $net=@('--bootstrap',$BootstrapDirectory,'--registry',$RegistryOrigin)
 try{
+    if($ConnectionCycle){
+        $profiles=@($PublisherProfile)+@($RecipientProfiles)
+        $lists=@{};$addresses=@{};$books=@{}
+        foreach($profile in $profiles){
+            $published=Call 'connection-own-publication-bootstrap' $profile (@('network','publish')+$net)
+            if($published.status -cne 'published' -or -not $published.networkVerified -or -not $published.contactPublished){throw 'Own publication bootstrap failed.'}
+            $lists[$profile]=Call 'connection-initial-native-contacts' $profile @('contact','list')
+            # Ordinary user-known descriptors from the actual owners. Private
+            # stdio/RAM only; never emitted in rows, files or process arguments.
+            $own=Call 'existing-profile-public-descriptor' $profile @('account','address')
+            if(-not $own.accountPresent -or [string]::IsNullOrWhiteSpace($own.address)){throw 'Existing descriptor unavailable; no account creation.'}
+            $addresses[$profile]=$own.address;$own=$null
+        }
+        foreach($profile in $profiles){
+            $entries=@(foreach($other in $profiles|Where-Object {$_ -cne $profile}){
+                $common=@($lists[$profile].contacts|Where-Object {$_.conversation -cin @($lists[$other].contacts.conversation)})
+                if($common.Count -ne 1 -or $common[0].state -cnotin @('PeerAcceptanceRetained','LocalAcceptanceRetained')){throw 'One accepted retained pair required.'}
+                [pscustomobject]@{conversation=$common[0].conversation;address=$addresses[$other]}
+            })
+            $books[$profile]=[pscustomobject]@{arguments=($entries|ConvertTo-Json -Depth 3 -Compress -AsArray);selectors=@($entries.conversation)}
+        }
+        $addresses.Clear()
+        # Two planned convergence passes, not retries of failed commands. Every
+        # API invocation renews its own publication and targets ALL own contacts;
+        # no script selects a peer address or invokes refresh/reintroduce-route.
+        foreach($pass in 1..2){foreach($profile in $profiles){
+            $verb=if($pass -eq 1){'verify'}else{'maintain'}
+            $cycle=Call ('connection-maintenance-pass-'+$pass) $profile (@('network',$verb,'--known-contacts',$books[$profile].arguments)+$net)
+            $lists[$profile]=Call 'connection-cycle-native-contacts' $profile @('contact','list')
+            $accepted=@($lists[$profile].contacts|Where-Object {$_.state -cin @('PeerAcceptanceRetained','LocalAcceptanceRetained')}).Count
+            Require-ConnectionCycleResult $cycle $accepted $false ($pass -eq 1)
+        }}
+        foreach($profile in $profiles){
+            $cycle=Call 'connection-maintenance-quiescent-replay' $profile (@('network','maintain','--known-contacts',$books[$profile].arguments)+$net)
+            $lists[$profile]=Call 'maintenance-retained-native-contacts' $profile @('contact','list')
+            $accepted=@($lists[$profile].contacts|Where-Object {$_.state -cin @('PeerAcceptanceRetained','LocalAcceptanceRetained')})
+            $outside=@($accepted|Where-Object {$_.conversation -cnotin $books[$profile].selectors}).Count
+            Require-ConnectionCycleResult $cycle $accepted.Count $true $false $outside
+        }
+        for($left=0;$left -lt $profiles.Count;$left++){for($right=$left+1;$right -lt $profiles.Count;$right++){
+            $common=@($lists[$profiles[$left]].contacts|Where-Object {$_.conversation -cin @($lists[$profiles[$right]].contacts.conversation)})
+            if($common.Count -ne 1){throw 'One exact retained pair required; no contact creation.'}
+            foreach($profile in @($profiles[$left],$profiles[$right])){
+                $health=Call 'post-cycle-retained-route-interval-check' $profile (@('contact','route-health','--conversation',$common[0].conversation)+$net)
+                if(-not $health.health.AdvertisementIntervalCoversNow -or $health.health.RouteFaultRetained){throw 'Connection cycle left an expired/faulted route.'}
+            }
+        }}
+        $books.Clear()
+    }else{
     $publisher=Call 'publisher-native-contacts' $PublisherProfile @('contact','list')
     foreach($recipient in $RecipientProfiles){
         $peer=Call 'recipient-native-contacts' $recipient @('contact','list')
@@ -70,7 +145,7 @@ try{
         if($common.Count -ne 1){throw 'One exact retained pair required; no contact creation.'}
         $conversation=$common[0].conversation
         if($Reintroduce){
-            [void](Call 'recipient-current-own-publication-maintenance' $recipient (@('network','verify')+$net))
+            [void](Call 'recipient-current-own-publication-maintenance' $recipient (@('network','publish')+$net))
             # Read only the peer's explicitly requested public address through
             # its real CLI. It remains in RAM and is never logged or archived.
             $address=Call 'read-existing-peer-public-address' $recipient @('account','address')
@@ -96,12 +171,15 @@ try{
         $again=Call 'exact-maintenance-no-new-control' $PublisherProfile (@('contact','refresh-route','--conversation',$conversation)+$net)
         if($again.completed -ne 0){throw 'Maintenance created duplicate work.'}
     }
+    }
     $passed=$true
 }finally{
     foreach($session in @($sessions.Values)){try{Close-CliSession $session}catch{$closeFailed=$true;$passed=$false}}
     if((RuntimeHash) -cne $runtimeHash){$passed=$false}
     [ordered]@{passed=$passed;runtimeSha256=$runtimeHash;scenarioSha256=$scenarioHash.ToLowerInvariant();sessionModuleSha256=$moduleHash.ToLowerInvariant();
-        recipientCount=$RecipientProfiles.Count;reintroduction=[bool]$Reintroduce;sessionCloseFailed=$closeFailed;steps=$steps.ToArray();releaseQualified=$false}|ConvertTo-Json -Depth 12|
+        recipientCount=$RecipientProfiles.Count;reintroduction=[bool]$Reintroduce;connectionCycle=[bool]$ConnectionCycle;
+        connectionCycleQualified=($passed -and $ConnectionCycle);periodicLifecycleQualified=$false;
+        sessionCloseFailed=$closeFailed;steps=$steps.ToArray();releaseQualified=$false}|ConvertTo-Json -Depth 12|
         Set-Content -LiteralPath (Join-Path $run 'receipt.json') -Encoding utf8
     Write-Host ([pscustomobject]@{passed=$passed;commands=$steps.Count}|ConvertTo-Json -Compress)
     if($closeFailed){throw 'Repair session did not close normally.'}

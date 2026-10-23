@@ -73,6 +73,8 @@ internal static class BusinessCommands
             {
                 ("network", "verify") => "NetworkVerify",
                 ("network", "refresh") => "NetworkRefresh",
+                ("network", "maintain") => "NetworkMaintain",
+                ("network", "publish") => "NetworkPublish",
                 ("contact", "request") => "ContactRequest",
                 ("contact", "stop") => "ContactStop",
                 ("contact", "accept") => "ContactAccept",
@@ -87,9 +89,16 @@ internal static class BusinessCommands
                 _ => throw new ArgumentException("Unsupported business operation.")
             };
             if (phase == "NetworkVerify")
-            { await network.VerifyAndPublishAsync(ct); return new { status = "ok", networkVerified = true, contactPublished = true }; }
+            { var maintenance = await network.VerifyAndMaintainContactsAsync(command.KnownContacts, ct); return new { status = "ok", networkVerified = true, contactPublished = true, maintenance }; }
+            if (phase == "NetworkPublish")
+            { await network.VerifyAndPublishAsync(ct); return new { status = "published", networkVerified = true, contactPublished = true }; }
             if (phase == "NetworkRefresh")
             { await network.RefreshGroupAuthorityAsync(ct); return new { status = "ok", groupAuthorityRefreshed = true }; }
+            if (phase == "NetworkMaintain")
+            {
+                var maintenance = await accounts.MaintainContactRoutesAsync(network.Source, command.KnownContacts, ct);
+                return new { status = maintenance.DeferredContacts == 0 && !maintenance.HasMore ? "maintained" : "partial", maintenance };
+            }
             if (phase == "GroupWork")
             {
                 // Only established group work shares the public session memo.

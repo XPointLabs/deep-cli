@@ -13,6 +13,11 @@ windows. See the [message/DTT checkpoint](docs/testing/cli-dtt-send-2026-10-19.m
 for retained failures. The current
 [message latency checkpoint](docs/testing/cli-message-latency-2026-10-19.md)
 records the complete three-client comparison and remaining data-plane delays.
+After an uncertain effect, a still-active protected retry lease schedules only
+its adapter-captured remaining interval (at most35s), not another full35s after
+preparation. This timing hint never authorizes dispatch: the next owned attempt
+must independently verify the original lease/custody/current authority, and a
+repeated refusal stays unknown without an unbounded loop.
 
 Build the solution with its explicit owned Shared/Protocol projects. A Release
 console with Debug dependencies is not a Release runtime: tests inspect all
@@ -87,7 +92,7 @@ For an established contact whose reverse route and XUR have both expired:
 deep contact reintroduce-route --profile alice --network <network> --bootstrap <public bundle> --registry <HTTPS origin> --conversation <existing conversation> --address <same peer permanent address>
 ```
 
-The peer must first publish its current own route (`network verify`). This reads
+The peer must first publish its current own route (`network publish`). This reads
 and independently verifies a current same-peer publication and carries ONLY the
 existing relationship's encrypted native route-maintenance control. It creates
 no new contact/account/ratchet and never uses an expired XRA/XUR as authority.
@@ -96,6 +101,24 @@ sender runs `mailbox sync`. Native forks, gaps, changed endpoints and missing
 original custody still refuse; a reset or new logical message is not recovery.
 `eng/Invoke-ContactRouteRepair.ps1 -Reintroduce` exercises that bidirectional flow
 on explicit retained CLI profiles, keeping public addresses only in memory.
+
+Normal `network verify` now activates the Shared contact-maintenance cycle after
+the CLI installs its actual native messaging owner. `network maintain` runs the
+same cycle without repeating account admission: renew own publication once,
+receive one bounded ordinary mailbox/independent ACK page, then visit every
+accepted retained device scope. `network publish` remains bootstrap-only.
+`verify`/`maintain` optionally accept `--known-contacts` as a JSON array of exact
+`conversation` and canonical `address` strings (at most128 entries). Prefer private
+session stdin, not shell arguments/history: descriptors contain resolver-read
+capabilities. This caller-owned book is never authority or emitted in diagnostics;
+the existing native same-peer consent/scope/control owner independently verifies
+any expired-route re-introduction. Faults and missing descriptors still defer.
+Sending a control does not mean the peer route has been adopted. Counts report
+partial work, not readiness; periodic scheduling and durable descriptor exchange
+are not supplied by this command. See the normative
+[DR-0174](../docs/survival-program/decisions/DR-0174-connection-contact-maintenance.md).
+`Invoke-ContactRouteRepair.ps1 -ConnectionCycle` tests these actual Shared cycles
+on retained profiles without invoking manual per-contact repair commands.
 
 Every aggregate decryption unwraps its32-byte key with native current-user DPAPI,
 authenticates the complete ciphertext/header with a128-bit GCM tag, and zeroes
@@ -197,7 +220,8 @@ Alongside `--profile` and `--network`, commands accept:
 
 | Command | Additional options |
 | --- | --- |
-| `network verify` | `--bootstrap`, `--registry` |
+| `network verify`, `network maintain` | `--bootstrap`, `--registry`, optional `--known-contacts` |
+| `network publish`, `network refresh` | `--bootstrap`, `--registry`; no known-contact side effects |
 | `contact request` | network options, `--address`, `--operation` |
 | `contact accept` | network options, `--conversation`, `--operation` |
 | `contact stop` | network options, `--operation` |

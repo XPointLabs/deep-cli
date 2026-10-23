@@ -30,6 +30,13 @@ public sealed class BusinessCommandTests
     [Fact]
     public void CompositeHostBudgetCoversPreparationWithoutChangingProtocolDeadlines() =>
         Assert.Equal(TimeSpan.FromMinutes(5), Program.CommandTimeout);
+
+    [Theory]
+    [InlineData("maintain")]
+    [InlineData("verify")]
+    [InlineData("publish")]
+    public void ConnectionMaintenanceUsesTheBoundedCompositeBudgetWithoutChangingAnyHop(string verb) =>
+        Assert.Equal(Program.GroupBatchTimeout, Program.TimeoutFor(["network", verb]));
     private const string Network = "11111111111111111111111111111111";
     private const string Conversation = "2222222222222222222222222222222222222222222222222222222222222222";
     private const string Operation = "3333333333333333333333333333333333333333333333333333333333333333";
@@ -66,6 +73,8 @@ public sealed class BusinessCommandTests
 
     [Theory]
     [InlineData("network", "verify")]
+    [InlineData("network", "maintain")]
+    [InlineData("network", "publish")]
     [InlineData("mailbox", "sync")]
     public void NetworkCommandsRequireExplicitBootstrapAndHttpsOrigin(string area, string verb)
     {

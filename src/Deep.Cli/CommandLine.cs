@@ -1,4 +1,6 @@
 using System.Text.RegularExpressions;
+using System.Text.Json;
+using Deep.Protocol.Identity;
 
 namespace Deep.Cli;
 
@@ -18,6 +20,7 @@ internal sealed record CommandLine(string Operation, string Profile, byte[] Netw
     internal string? Device { get; init; }
     internal string? Output { get; init; }
     internal string? Group { get; init; }
+    internal IReadOnlyDictionary<string, DeepPermanentIdV2>? KnownContacts { get; init; }
     internal static CommandLine Parse(string[] args)
     {
         if (args.Length < 2) throw new ArgumentException("Unsupported command.");
@@ -25,7 +28,7 @@ internal sealed record CommandLine(string Operation, string Profile, byte[] Netw
         {
             ("account", "create") => new[] { "--name" },
             ("account", "status" or "address") or ("contact", "list" or "operations") or ("message", "pending") or ("attachment", "pending" or "operations") => [],
-            ("session", "run") or ("network", "verify" or "refresh") or ("mailbox", "sync") => ["--bootstrap", "--registry"],
+            ("session", "run") or ("network", "verify" or "refresh" or "maintain" or "publish") or ("mailbox", "sync") => ["--bootstrap", "--registry"],
             ("contact", "request") => ["--bootstrap", "--registry", "--address", "--operation"],
             ("contact", "stop") => ["--bootstrap", "--registry", "--operation"],
             ("contact", "accept") => ["--bootstrap", "--registry", "--conversation", "--operation"],
@@ -48,6 +51,7 @@ internal sealed record CommandLine(string Operation, string Profile, byte[] Netw
             _ => throw new ArgumentException("Unsupported command.")
         };
         var allowed = new HashSet<string>(["--profile", "--network", .. extra], StringComparer.Ordinal);
+        if (args[0] == "network" && args[1] is "verify" or "maintain") allowed.Add("--known-contacts");
         var options = new Dictionary<string, string>(StringComparer.Ordinal);
         for (var i = 2; i < args.Length; i += 2)
         {
@@ -82,7 +86,34 @@ internal sealed record CommandLine(string Operation, string Profile, byte[] Netw
             OperationId = options.GetValueOrDefault("--operation"), Text = options.GetValueOrDefault("--text"),
             File = options.GetValueOrDefault("--file"), MediaType = options.GetValueOrDefault("--media"), Asset = options.GetValueOrDefault("--asset"),
             Logical = options.GetValueOrDefault("--logical"), Device = options.GetValueOrDefault("--device"), Output = options.GetValueOrDefault("--output"),
-            Group = options.GetValueOrDefault("--group")
+            Group = options.GetValueOrDefault("--group"), KnownContacts = ParseKnownContacts(options.GetValueOrDefault("--known-contacts"))
         };
+    }
+
+    private static IReadOnlyDictionary<string, DeepPermanentIdV2>? ParseKnownContacts(string? text)
+    {
+        if (text is null) return null;
+        if (text.Length > CliSession.MaximumFrameCharacters) throw new ArgumentException("Known-contact metadata exceeds its bound.");
+        try
+        {
+            using var document = JsonDocument.Parse(text, new JsonDocumentOptions { MaxDepth = 4 });
+            if (document.RootElement.ValueKind != JsonValueKind.Array ||
+                document.RootElement.GetArrayLength() > Deep.Client.Shared.Services.DeepIdV2AccountService.MaximumKnownContactAddresses)
+                throw new ArgumentException("Invalid known-contact metadata.");
+            var result = new Dictionary<string, DeepPermanentIdV2>(StringComparer.OrdinalIgnoreCase);
+            foreach (var entry in document.RootElement.EnumerateArray())
+            {
+                if (entry.ValueKind != JsonValueKind.Object || entry.EnumerateObject().Count() != 2 ||
+                    !entry.TryGetProperty("conversation", out var conversation) || conversation.ValueKind != JsonValueKind.String ||
+                    !entry.TryGetProperty("address", out var address) || address.ValueKind != JsonValueKind.String ||
+                    !Regex.IsMatch(conversation.GetString()!, "\\A[0-9A-Fa-f]{64}\\z"))
+                    throw new ArgumentException("Invalid known-contact metadata.");
+                if (!result.TryAdd(conversation.GetString()!.ToUpperInvariant(), DeepPermanentIdV2.ParseCanonical(address.GetString()!)))
+                    throw new ArgumentException("Duplicate known-contact metadata.");
+            }
+            return result; // Caller data, never serialized into diagnostic output.
+        }
+        catch (Exception error) when (error is JsonException or FormatException or System.Security.Cryptography.CryptographicException)
+        { throw new ArgumentException("Invalid known-contact metadata."); }
     }
 }
