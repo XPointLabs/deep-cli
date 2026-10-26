@@ -14,6 +14,7 @@ internal sealed class CliSession(CommandLine binding) : IDisposable, IAsyncDispo
     private readonly SemaphoreSlim operations = new(1, 1);
     private readonly CancellationTokenSource stopping = new();
     private Task? maintenance;
+    private DeliveryDiagnostics? delivery;
     private long maintenanceChecks, maintenanceFailures, maintenanceMilliseconds;
     private bool disposed;
 
@@ -93,22 +94,34 @@ internal sealed class CliSession(CommandLine binding) : IDisposable, IAsyncDispo
         Dispose();
     }
 
-    internal static async Task<int> RunAsync(CommandLine binding, TextReader input, TextWriter output, CancellationToken ct)
+    internal static async Task<int> RunAsync(CommandLine binding, TextReader input, TextWriter output, CancellationToken ct,
+        TextWriter? diagnostics = null)
     {
         await using var session = new CliSession(binding);
+        await using var delivery = binding.DeliveryEvents ? new DeliveryDiagnostics(diagnostics ?? TextWriter.Null) : null;
+        session.delivery = delivery;
         session.maintenance = session.MaintainAsync();
         return await RunFramesAsync(input, output, async args =>
         {
             using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
             budget.CancelAfter(Program.TimeoutFor(args));
             using var stdout = new StringWriter(); using var stderr = new StringWriter();
+            CommandLine? admitted = null;
+            if (delivery is not null)
+            {
+                try { admitted = CommandLine.Parse(args); session.RequireBinding(admitted); }
+                catch (ArgumentException) { admitted = null; } // Ordinary Program error framing remains authoritative.
+            }
+            // Admit the valid bound command before its serial queue wait. The
+            // same parsed value is used by Program; no alternate command grammar.
+            using var observation = admitted is null ? null : delivery?.AcceptCommand();
             try { await session.operations.WaitAsync(budget.Token).ConfigureAwait(false); }
             catch (OperationCanceledException)
             { return "{\"exitCode\":130,\"result\":{\"status\":\"error\",\"code\":\"cancelled\"}}"; }
             int exit;
             try
             {
-                exit = await Program.RunAsync(args, stdout, stderr, budget.Token, session).ConfigureAwait(false);
+                exit = await Program.RunAsync(args, stdout, stderr, budget.Token, session, admitted).ConfigureAwait(false);
                 // Failed commands retain durable work, but never retain a possibly
                 // invalid public composition for the next independent command.
                 if (exit != 0) session.InvalidateNetwork();

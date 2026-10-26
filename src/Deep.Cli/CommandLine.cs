@@ -20,6 +20,7 @@ internal sealed record CommandLine(string Operation, string Profile, byte[] Netw
     internal string? Device { get; init; }
     internal string? Output { get; init; }
     internal string? Group { get; init; }
+    internal bool DeliveryEvents { get; init; }
     internal IReadOnlyDictionary<string, DeepPermanentIdV2>? KnownContacts { get; init; }
     internal static CommandLine Parse(string[] args)
     {
@@ -51,6 +52,7 @@ internal sealed record CommandLine(string Operation, string Profile, byte[] Netw
             _ => throw new ArgumentException("Unsupported command.")
         };
         var allowed = new HashSet<string>(["--profile", "--network", .. extra], StringComparer.Ordinal);
+        if (args is ["session", "run", ..]) allowed.Add("--delivery-events");
         if (args[0] == "network" && args[1] is "verify" or "maintain") allowed.Add("--known-contacts");
         var options = new Dictionary<string, string>(StringComparer.Ordinal);
         for (var i = 2; i < args.Length; i += 2)
@@ -66,6 +68,8 @@ internal sealed record CommandLine(string Operation, string Profile, byte[] Netw
             network.All(c => c == '0'))
             throw new ArgumentException("Explicit profile and network are required.");
         options.TryGetValue("--name", out var name);
+        if (options.TryGetValue("--delivery-events", out var deliveryEvents) && deliveryEvents != "true")
+            throw new ArgumentException("Delivery events require explicit true.");
         if (extra.Any(key => !options.TryGetValue(key, out var value) || string.IsNullOrWhiteSpace(value)) ||
             name is not null && (name.Length > 80 || name.Any(char.IsControl)))
             throw new ArgumentException("Invalid display name option.");
@@ -86,7 +90,8 @@ internal sealed record CommandLine(string Operation, string Profile, byte[] Netw
             OperationId = options.GetValueOrDefault("--operation"), Text = options.GetValueOrDefault("--text"),
             File = options.GetValueOrDefault("--file"), MediaType = options.GetValueOrDefault("--media"), Asset = options.GetValueOrDefault("--asset"),
             Logical = options.GetValueOrDefault("--logical"), Device = options.GetValueOrDefault("--device"), Output = options.GetValueOrDefault("--output"),
-            Group = options.GetValueOrDefault("--group"), KnownContacts = ParseKnownContacts(options.GetValueOrDefault("--known-contacts"))
+            Group = options.GetValueOrDefault("--group"), DeliveryEvents = deliveryEvents is not null,
+            KnownContacts = ParseKnownContacts(options.GetValueOrDefault("--known-contacts"))
         };
     }
 

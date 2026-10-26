@@ -32,7 +32,7 @@ internal static class Program
     }
 
     internal static async Task<int> RunAsync(string[] args, TextWriter output, TextWriter error,
-        CancellationToken ct = default, CliSession? session = null)
+        CancellationToken ct = default, CliSession? session = null, CommandLine? admittedCommand = null)
     {
         using var work = ProtectionWork.Begin();
         using var networkWork = new NetworkWork();
@@ -58,12 +58,12 @@ internal static class Program
                     "Windows host; isolated persistent DID2 profiles. Stored is not remote delivery.");
                 return 0;
             }
-            var command = CommandLine.Parse(args);
+            var command = admittedCommand ?? CommandLine.Parse(args);
             ct.ThrowIfCancellationRequested();
             if (command.Area == "session")
             {
                 if (session is not null) throw new ArgumentException("Nested session rejected.");
-                return await CliSession.RunAsync(command, Console.In, output, ct);
+                return await CliSession.RunAsync(command, Console.In, output, ct, error);
             }
             using var ownedProfile = session is null ? WindowsProfile.Open(command) : null;
             var profile = session?.GetProfile(command) ?? ownedProfile!;

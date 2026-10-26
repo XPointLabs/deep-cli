@@ -429,3 +429,47 @@ custody or durable retry semantics changes; see the
 The three-client driver accepts `-PersistentSessions`. It records this mode,
 archives its stdio helper, and closes each host before cold replay/history
 checks. Session measurements do not imply physical-device qualification.
+
+For P0 engineering measurements, a session may explicitly add
+`--delivery-events true`. Stdout retains one existing response per command;
+stderr becomes a separate bounded `deep.delivery.v1` event stream. It contains
+only schema/version, stream sequence, command ordinal, closed phase and two
+domain-separated hashes of random authenticated semantic IDs. No payload,
+address, key, capability or source-process timestamp is emitted. The Shared
+owner releases durable-readable observations after its final freshness guard
+and private custody release, before the independent mailbox ACK. Exact semantic
+replay emits no second readable event; failed admission emits none. This local
+event does not change sender delivery status.
+
+`eng/CliSession.psm1` exposes `New-DeliveryEventController` (PowerShell7), plus
+`Start-CliSessionCommand`/`Complete-CliSessionCommand` for concurrent commands on
+distinct persistent clients. Pass the same controller to each `New-CliSession`
+with distinct `-ControllerRole` values1..3. Its independent reader tasks stamp
+each complete event with one controller's monotonic clock; command completion,
+history reads and ACK responses never supply a visible timestamp. `Sample`
+requires the sender's command ordinal and exact recipient roles. Unknown fields,
+versions/phases, duplicates, gaps, stale command events and oversized/truncated
+frames reject qualification. Every stream must end with its mandatory
+`StreamClosed` terminal (`dropped=0`) and EOF before any sample can qualify.
+The terminal bypasses the bounded diagnostic queue, so a dropped final frame
+invalidates the whole run even when no later event exposes a sequence gap.
+Each target also needs its current `StoreQuorum` observation; a cached historical
+receipt emits none and cannot qualify a fresh warm send.
+Missing/failed samples retain positive infinity;
+`NearestRank` includes them. The adapter records the sender's actual command
+exit, and a failed/timed-out or unfinished sender remains infinity even if a
+recipient became visible. `Invoke`/`Complete` return the controller command
+ordinal used by `Sample`; response completion never supplies its timestamp.
+The finite4096-event run bound requires a fresh
+controller per independent run.
+
+Current phases are `NativeOutboxDurable`, `StoreQuorum` and
+`RecipientDurableReadable`. Native outbox timing describes the committed
+encrypted per-target transition, not the earlier logical command reservation.
+Tombstone ACK and authenticated application receipt timings remain unobserved;
+they cannot be inferred from these phases. The adapter adds no receive scheduler.
+The existing sequential E2E drivers remain command-duration baselines. This P0
+instrumentation does not qualify warm-online latency or replace the sprint's
+short progress proof and subsequent acceptance runs.
+The [P0 checkpoint](docs/testing/cli-durable-visibility-events-2026-10-26.md)
+records exact receipts, review corrections and remaining limits.
