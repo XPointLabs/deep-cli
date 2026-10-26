@@ -6,6 +6,18 @@ no MAUI workloads, emulator or device deployment for the inner development loop.
 Place this repository beside `deep-client-shared` and `deep-protocol`, as in the
 XPointLabs workspace. Requires Windows and .NET SDK10.0.301 initially.
 
+Private storage uses the [DR-0176](../docs/survival-program/decisions/DR-0176-bounded-protected-storage-inventory.md)
+manifest/object contract. `account create` explicitly initializes an empty private
+profile; ordinary commands require committed storage and do not initialize,
+convert or repair missing state. Existing aggregate profiles require the explicit
+standalone command `deep storage enroll --profile <alias> --network <hex>` under
+the same exclusive profile lock. Enrollment preserves logical slots and native
+account files; it cannot run inside `session run`. Retained conversion and
+activation remain gated. See the [storage adapter checkpoint](docs/testing/cli-storage-manifest-adapter.md)
+for lifecycle tests, actual I/O counters and the disposable provider benchmark.
+The measured manifest candidate is slower across the sampled operations and
+sizes; these checks do not establish a performance or retained-activation gate.
+
 Connected commands report `recoveryWork` separately from driver attempts: bounded
 Store/mailbox resumes and waits for protected retry leases. Recovery re-enters
 the original owned operation, never reruns queue/group creation or relaxes signed
@@ -220,6 +232,7 @@ Alongside `--profile` and `--network`, commands accept:
 
 | Command | Additional options |
 | --- | --- |
+| `storage enroll` | none; standalone existing-namespace conversion, no network I/O or authority/transport/reset overrides |
 | `network verify`, `network maintain` | `--bootstrap`, `--registry`, optional `--known-contacts` |
 | `network publish`, `network refresh` | `--bootstrap`, `--registry`; no known-contact side effects |
 | `contact request` | network options, `--address`, `--operation` |

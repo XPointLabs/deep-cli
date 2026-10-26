@@ -12,29 +12,73 @@ internal sealed class WindowsProfile : IDisposable
 {
     private readonly FileStream commandLease;
     private readonly JournaledDeepSecureStorage storage;
-    private readonly CurrentUserProtector protector = new();
+    private readonly CurrentUserProtector protector;
     internal DeepIdV2AccountService Accounts { get; }
+    internal DeepSecureStorageWorkSnapshot StorageWork => storage.ReadWorkSnapshot();
 
-    private WindowsProfile(string root, byte[] network)
+    private WindowsProfile(string root, byte[] network, FileStream commandLease,
+        JournaledDeepSecureStorage storage, CurrentUserProtector protector)
     {
-        commandLease = new FileStream(Path.Combine(root, "command.lock"), FileMode.OpenOrCreate,
-            FileAccess.ReadWrite, FileShare.None);
+        this.commandLease = commandLease; this.storage = storage; this.protector = protector;
+        Accounts = new DeepIdV2AccountService(storage, Path.Combine(root, "deep-store-v2"), network,
+            1, new SystemClock(), DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
+    }
+
+    internal static async Task<WindowsProfile> OpenAsync(CommandLine command, CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (command.Area == "storage") throw new ArgumentException("Storage enrollment is standalone.");
+        var creating = command.Area == "account" && command.Operation == "create";
+        var root = PrepareRoot(command, creating);
+        var commandLease = AcquireCommandLease(root);
+        var protector = new CurrentUserProtector();
+        JournaledDeepSecureStorage? storage = null;
         try
         {
-            storage = new JournaledDeepSecureStorage(Path.Combine(root, "deep-store-v2", "secure-storage.dss"),
-                protector);
-            Accounts = new DeepIdV2AccountService(storage, Path.Combine(root, "deep-store-v2"), network,
-                1, new SystemClock(), DeepMlDsa65CandidateVerifierFactory.OpenForCurrentProcess);
+            ct.ThrowIfCancellationRequested();
+            var directory = Path.Combine(root, "deep-store-v2");
+            var path = Path.Combine(directory, "secure-storage.dss");
+            if (creating && !File.Exists(path))
+            {
+                // Account creation can initialize only a genuinely empty owned
+                // profile. Missing committed state beside any prior state is
+                // refusal, never permission to replace its keys or instance.
+                RequireEmptyProfile(root, directory);
+                Directory.CreateDirectory(directory);
+                RequireNoReparseTree(root);
+                storage = await JournaledDeepSecureStorage.CreateNewAsync(path, protector, ct).ConfigureAwait(false);
+            }
+            else storage = new JournaledDeepSecureStorage(path, protector);
+            ct.ThrowIfCancellationRequested();
+            return new WindowsProfile(root, command.Network, commandLease, storage, protector);
         }
         catch { storage?.Dispose(); protector.Dispose(); commandLease.Dispose(); throw; }
     }
 
-    internal static WindowsProfile Open(CommandLine command)
+    internal static async Task<DeepSecureStorageWorkSnapshot> EnrollStorageAsync(CommandLine command, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (command.Area != "storage" || command.Operation != "enroll")
+            throw new ArgumentException("Explicit storage enrollment required.");
+        var root = PrepareRoot(command, create: false);
+        using var commandLease = AcquireCommandLease(root);
+        using var protector = new CurrentUserProtector();
+        using var storage = await JournaledDeepSecureStorage.EnrollAggregateAsync(
+            Path.Combine(root, "deep-store-v2", "secure-storage.dss"), protector, ct).ConfigureAwait(false);
+        return storage.ReadWorkSnapshot();
+    }
+
+    private static FileStream AcquireCommandLease(string root) =>
+        new(Path.Combine(root, "command.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+
+    private static string PrepareRoot(CommandLine command, bool create)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
         var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "XPointLabs", "DeepCli", Convert.ToHexStringLower(command.Network), command.Profile);
         RequireNoReparseAncestors(root);
+        if (!create && !Directory.Exists(root))
+            throw new DirectoryNotFoundException("An existing private profile is required.");
         var security = new DirectorySecurity();
         var user = WindowsIdentity.GetCurrent().User ?? throw new UnauthorizedAccessException();
         security.SetOwner(user);
@@ -44,13 +88,33 @@ internal sealed class WindowsProfile : IDisposable
             AccessControlType.Allow));
         // The profile is private from creation, before any account/SQL/key write.
         var profile = new DirectoryInfo(root);
-        profile.Create(security);
+        if (create) profile.Create(security);
         profile.SetAccessControl(security);
         RequireNoReparseAncestors(root);
-        foreach (var child in profile.EnumerateFileSystemInfos("*", SearchOption.AllDirectories))
-            if ((child.Attributes & FileAttributes.ReparsePoint) != 0)
-                throw new IOException("Profile reparse point rejected.");
-        return new WindowsProfile(root, command.Network);
+        RequireNoReparseTree(root);
+        return root;
+    }
+
+    private static void RequireEmptyProfile(string root, string storageDirectory)
+    {
+        foreach (var entry in Directory.EnumerateFileSystemEntries(root))
+            if (!StringComparer.OrdinalIgnoreCase.Equals(entry, Path.Combine(root, "command.lock")) &&
+                !StringComparer.OrdinalIgnoreCase.Equals(entry, storageDirectory))
+                throw new IOException("Missing committed storage cannot initialize a populated profile.");
+        if (Directory.Exists(storageDirectory) && Directory.EnumerateFileSystemEntries(storageDirectory).Any())
+            throw new IOException("Missing committed storage cannot initialize a populated profile.");
+    }
+
+    private static void RequireNoReparseTree(string root)
+    {
+        var pending = new Stack<DirectoryInfo>(); pending.Push(new(root));
+        while (pending.TryPop(out var directory))
+            foreach (var child in directory.EnumerateFileSystemInfos())
+            {
+                if ((child.Attributes & FileAttributes.ReparsePoint) != 0)
+                    throw new IOException("Profile reparse point rejected.");
+                if (child is DirectoryInfo nested) pending.Push(nested);
+            }
     }
 
     private static void RequireNoReparseAncestors(string root)

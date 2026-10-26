@@ -115,7 +115,7 @@ function Complete-Command([int]$role,[int]$budget){
         $response=Complete-CliSessionCommand $sessions[$role] $item.Handle $budget
         $result=$response.Result
         $row=[ordered]@{role=$role;phase=$item.Phase;commandOrdinal=$response.CommandOrdinal;exit=$response.ExitCode;commandMilliseconds=$item.Watch.ElapsedMilliseconds;cpuMilliseconds=$response.ProcessorMilliseconds}
-        foreach($field in @('networkWork','runtimeWork','persistenceWork','nativeStorageWork','protectionWork','sessionWork')){
+        foreach($field in @('networkWork','runtimeWork','persistenceWork','nativeStorageWork','storageWork','protectionWork','sessionWork')){
             if($result.PSObject.Properties.Name -contains $field){$row[$field]=$result.$field}
         }
         if($response.ExitCode -ne 0){

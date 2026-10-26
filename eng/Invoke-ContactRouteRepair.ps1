@@ -59,7 +59,7 @@ function Call([string]$phase,[string]$profile,[string[]]$arguments){
     $budget=if($arguments[0] -ceq 'network' -and $arguments[1] -cin @('maintain','verify','publish')){1830000}else{330000}
     $result=Invoke-CliSession $sessions[$profile] ($arguments+@('--profile',$profile,'--network',$network)) $budget
     $row=[ordered]@{phase=$phase;exit=$result.ExitCode;milliseconds=$watch.ElapsedMilliseconds;processorMilliseconds=$result.ProcessorMilliseconds;attempt=1}
-    foreach($field in @('networkWork','runtimeWork','recoveryWork','persistenceWork','sessionWork')){if($result.Result.PSObject.Properties.Name -contains $field){$row[$field]=$result.Result.$field}}
+    foreach($field in @('networkWork','runtimeWork','recoveryWork','persistenceWork','storageWork','sessionWork')){if($result.Result.PSObject.Properties.Name -contains $field){$row[$field]=$result.Result.$field}}
     if($result.Result.PSObject.Properties.Name -contains 'maintenance'){$row['contactMaintenance']=$result.Result.maintenance}
     $steps.Add([pscustomobject]$row);[pscustomobject]$row|ConvertTo-Json -Depth 6 -Compress|Write-Host
     if($result.ExitCode -ne 0){$result.Result.diagnostic|ConvertTo-Json -Depth 10|Set-Content -LiteralPath (Join-Path $run ('failure-'+$steps.Count+'.json')) -Encoding utf8;throw 'Owned repair failed; original state retained.'}

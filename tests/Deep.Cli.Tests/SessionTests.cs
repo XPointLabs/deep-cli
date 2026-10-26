@@ -18,7 +18,8 @@ public sealed class SessionTests
         session.RequireBinding(command);
         foreach (var changed in new[] { command with { Profile = "other" },
             command with { Network = RandomNumberGenerator.GetBytes(16) },
-            command with { Bootstrap = "another-bundle" }, command with { Registry = "https://other/" }, binding })
+            command with { Bootstrap = "another-bundle" }, command with { Registry = "https://other/" },
+            command with { Area = "storage", Operation = "enroll" }, binding })
             Assert.Throws<ArgumentException>(() => session.RequireBinding(changed));
         session.Dispose();
         Assert.Throws<ObjectDisposedException>(() => session.RequireBinding(command));
@@ -69,17 +70,18 @@ public sealed class SessionTests
     {
         var binding = Binding();
         var args = new[] { "account", "status", "--profile", binding.Profile, "--network", Convert.ToHexStringLower(binding.Network) };
+        using (await WindowsProfile.OpenAsync(CommandLine.Parse(["account", "create", .. args[2..], "--name", "Empty session fixture"]))) { }
         using var output = new StringWriter(); using var error = new StringWriter();
         using (var session = new CliSession(binding))
         {
             var command = CommandLine.Parse(args);
-            Assert.Same(session.GetProfile(command), session.GetProfile(command));
-            Assert.Throws<IOException>(() => WindowsProfile.Open(command));
+            Assert.Same(await session.GetProfileAsync(command), await session.GetProfileAsync(command));
+            await Assert.ThrowsAsync<IOException>(() => WindowsProfile.OpenAsync(command));
             Assert.Equal(0, await Program.RunAsync(args, output, error, default, session));
             Assert.Equal(0, await Program.RunAsync(args, output, error, default, session));
             Assert.Equal("", error.ToString());
         }
-        using var reopened = WindowsProfile.Open(CommandLine.Parse(args));
+        using var reopened = await WindowsProfile.OpenAsync(CommandLine.Parse(args));
         reopened.Dispose(); reopened.Dispose();
         await Assert.ThrowsAsync<ObjectDisposedException>(() => reopened.Accounts.GetCurrentAsync());
     }
@@ -90,6 +92,7 @@ public sealed class SessionTests
         var binding = Binding();
         string[] Args(string area, string operation) => [area, operation, "--profile", binding.Profile,
             "--network", Convert.ToHexStringLower(binding.Network)];
+        using (await WindowsProfile.OpenAsync(CommandLine.Parse([.. Args("account", "create"), "--name", "Empty frame fixture"]))) { }
         var frames = JsonSerializer.Serialize(Args("account", "status")) + "\n" +
             JsonSerializer.Serialize(Args("group", "list")) + "\n";
         using var output = new StringWriter();
@@ -101,6 +104,6 @@ public sealed class SessionTests
         Assert.False(first.RootElement.GetProperty("result").GetProperty("accountPresent").GetBoolean());
         Assert.Equal(4, second.RootElement.GetProperty("exitCode").GetInt32());
         Assert.Equal("account-missing", second.RootElement.GetProperty("result").GetProperty("code").GetString());
-        using var reopened = WindowsProfile.Open(CommandLine.Parse(Args("account", "status")));
+        using var reopened = await WindowsProfile.OpenAsync(CommandLine.Parse(Args("account", "status")));
     }
 }

@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Deep.Client.Shared.Services;
+using Deep.Client.Shared.Persistence;
 
 namespace Deep.Cli;
 
@@ -39,6 +40,8 @@ internal static class Program
         using var persistenceWork = new PersistenceWork();
         var runtimeWork = new RuntimeWork();
         DeepIdV2AccountService? recoveryAccount = null;
+        WindowsProfile? measuredProfile = null;
+        var initialStorageWork = session?.StorageWork ?? default(DeepSecureStorageWorkSnapshot);
         long initialStore = 0, initialMailbox = 0, initialWaits = 0;
         object RecoverySnapshot() => new
         {
@@ -51,7 +54,7 @@ internal static class Program
             if (session is null && args is (["--help"] or []))
             {
                 await output.WriteLineAsync("deep <area> <command> --profile <alias> --network <32 lowercase hex> [options]\n" +
-                    "account create/status/address; network verify/refresh/maintain/publish; contact request/accept/stop/list/operations/route-health/refresh-route/reintroduce-route; mailbox sync; message queue/send/list/pending; attachment prepare/queue/send/pending/operations/list/download; group create/invite/accept/advance/send/resume/flush/list/messages\n" +
+                    "account create/status/address; storage enroll (standalone existing profile); network verify/refresh/maintain/publish; contact request/accept/stop/list/operations/route-health/refresh-route/reintroduce-route; mailbox sync; message queue/send/list/pending; attachment prepare/queue/send/pending/operations/list/download; group create/invite/accept/advance/send/resume/flush/list/messages\n" +
                     "Network operations require --bootstrap <public dev bundle> --registry <canonical HTTPS origin>.\n" +
                     "request: --address --operation; accept: --conversation --operation; queue: --conversation --text; send: --conversation --operation --text.\n" +
                     "session run: bounded JSON argument arrays on stdin; one bound profile/network/bootstrap/origin, serial commands until EOF.\n" +
@@ -65,8 +68,17 @@ internal static class Program
                 if (session is not null) throw new ArgumentException("Nested session rejected.");
                 return await CliSession.RunAsync(command, Console.In, output, ct, error);
             }
-            using var ownedProfile = session is null ? WindowsProfile.Open(command) : null;
-            var profile = session?.GetProfile(command) ?? ownedProfile!;
+            if (command.Area == "storage")
+            {
+                if (session is not null) throw new ArgumentException("Storage enrollment must run outside a session.");
+                var enrolled = await WindowsProfile.EnrollStorageAsync(command, ct).ConfigureAwait(false);
+                await output.WriteLineAsync(JsonSerializer.Serialize(new { status = "enrolled",
+                    storageWork = SecureStorageWork.Delta(enrolled), protectionWork = work.Snapshot() }));
+                return 0;
+            }
+            using var ownedProfile = session is null ? await WindowsProfile.OpenAsync(command, ct).ConfigureAwait(false) : null;
+            var profile = session is null ? ownedProfile! : await session.GetProfileAsync(command, ct).ConfigureAwait(false);
+            measuredProfile = profile;
             recoveryAccount = profile.Accounts;
             initialStore = recoveryAccount.ExactStoreResumes; initialMailbox = recoveryAccount.ExactMailboxResumes;
             initialWaits = recoveryAccount.ExactRecoveryLeaseWaits;
@@ -80,6 +92,7 @@ internal static class Program
                 encoded["runtimeWork"] = JsonSerializer.SerializeToNode(runtimeWork.Snapshot());
                 encoded["persistenceWork"] = JsonSerializer.SerializeToNode(persistenceWork.Snapshot());
                 encoded["nativeStorageWork"] = JsonSerializer.SerializeToNode(persistenceWork.NativeSnapshot());
+                encoded["storageWork"] = JsonSerializer.SerializeToNode(SecureStorageWork.Delta(profile.StorageWork, initialStorageWork));
                 encoded["recoveryWork"] = JsonSerializer.SerializeToNode(RecoverySnapshot());
                 if (session is not null) encoded["sessionWork"] = JsonSerializer.SerializeToNode(session.Snapshot());
                 await output.WriteLineAsync(encoded.ToJsonString());
@@ -97,14 +110,15 @@ internal static class Program
                 status = command.Operation == "create" ? "created" : "ok",
                 accountPresent = account is not null,
                 address = command.Operation == "status" ? null : account?.PermanentId.CanonicalText,
-                protectionWork = work.Snapshot()
+                protectionWork = work.Snapshot(),
+                storageWork = SecureStorageWork.Delta(profile.StorageWork, initialStorageWork)
             }));
             return 0;
         }
         catch (OperationCanceledException) { return await FailAsync(error, "cancelled", 130); }
         catch (CliBusinessException failure)
         {
-            await error.WriteLineAsync(JsonSerializer.Serialize(new { status = "error", code = "business-operation-failed", diagnostic = failure.ClosedDiagnostic(), protectionWork = work.Snapshot(), networkWork = networkWork.Snapshot(), runtimeWork = runtimeWork.Snapshot(), persistenceWork = persistenceWork.Snapshot(), nativeStorageWork = persistenceWork.NativeSnapshot(), recoveryWork = RecoverySnapshot(), sessionWork = session?.Snapshot() }));
+            await error.WriteLineAsync(JsonSerializer.Serialize(new { status = "error", code = "business-operation-failed", diagnostic = failure.ClosedDiagnostic(), protectionWork = work.Snapshot(), networkWork = networkWork.Snapshot(), runtimeWork = runtimeWork.Snapshot(), persistenceWork = persistenceWork.Snapshot(), nativeStorageWork = persistenceWork.NativeSnapshot(), storageWork = measuredProfile is null ? null : SecureStorageWork.Delta(measuredProfile.StorageWork, initialStorageWork), recoveryWork = RecoverySnapshot(), sessionWork = session?.Snapshot() }));
             return ct.IsCancellationRequested ? 130 : 6;
         }
         catch (ArgumentException) { return await FailAsync(error, "invalid-arguments", 2); }

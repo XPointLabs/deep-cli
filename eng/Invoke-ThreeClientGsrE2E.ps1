@@ -117,6 +117,7 @@ function Invoke-Client([string]$phase, [string]$profile, [string[]]$command, [in
         if ($metrics.PSObject.Properties.Name -contains 'networkWork') { $row | Add-Member networkWork @($metrics.networkWork) }
         if ($metrics.PSObject.Properties.Name -contains 'runtimeWork') { $row | Add-Member runtimeWork $metrics.runtimeWork }
         if ($metrics.PSObject.Properties.Name -contains 'persistenceWork') { $row | Add-Member persistenceWork @($metrics.persistenceWork) }
+        if ($metrics.PSObject.Properties.Name -contains 'storageWork') { $row | Add-Member storageWork $metrics.storageWork }
         if ($metrics.PSObject.Properties.Name -contains 'protectionWork') { $row | Add-Member protectionWork $metrics.protectionWork }
         if ($metrics.PSObject.Properties.Name -contains 'sessionWork') { $row | Add-Member sessionWork $metrics.sessionWork }
         if ($metrics.PSObject.Properties.Name -contains 'recoveryWork') { $row | Add-Member recoveryWork $metrics.recoveryWork }

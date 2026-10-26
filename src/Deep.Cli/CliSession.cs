@@ -21,24 +21,27 @@ internal sealed class CliSession(CommandLine binding) : IDisposable, IAsyncDispo
     internal void RequireBinding(CommandLine command)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
-        if (command.Area == "session" || command.Profile != binding.Profile ||
+        if (command.Area is "session" or "storage" || command.Profile != binding.Profile ||
             !command.Network.AsSpan().SequenceEqual(binding.Network) ||
             command.Bootstrap is not null && !StringComparer.Ordinal.Equals(command.Bootstrap, binding.Bootstrap) ||
             command.Registry is not null && !StringComparer.Ordinal.Equals(command.Registry, binding.Registry))
             throw new ArgumentException("Session configuration cannot change.");
     }
 
-    internal WindowsProfile GetProfile(CommandLine command)
+    internal async Task<WindowsProfile> GetProfileAsync(CommandLine command, CancellationToken ct = default)
     {
         RequireBinding(command);
-        return profile ??= WindowsProfile.Open(binding);
+        return profile ??= await WindowsProfile.OpenAsync(command, ct).ConfigureAwait(false);
     }
+
+    internal Deep.Client.Shared.Persistence.DeepSecureStorageWorkSnapshot StorageWork => profile?.StorageWork ?? default;
 
     internal async Task<DeepIdV2ClientNetworkSession> GetNetworkAsync(CommandLine command, CancellationToken ct)
     {
         RequireBinding(command);
         ct.ThrowIfCancellationRequested();
-        return network ??= await NetworkBootstrap.OpenAsync(binding, GetProfile(command).Accounts, ct).ConfigureAwait(false);
+        return network ??= await NetworkBootstrap.OpenAsync(binding,
+            (await GetProfileAsync(command, ct).ConfigureAwait(false)).Accounts, ct).ConfigureAwait(false);
     }
 
     internal void InvalidateNetwork() { network?.Dispose(); network = null; }

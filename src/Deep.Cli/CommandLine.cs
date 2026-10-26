@@ -28,6 +28,7 @@ internal sealed record CommandLine(string Operation, string Profile, byte[] Netw
         var extra = (args[0], args[1]) switch
         {
             ("account", "create") => new[] { "--name" },
+            ("storage", "enroll") => [],
             ("account", "status" or "address") or ("contact", "list" or "operations") or ("message", "pending") or ("attachment", "pending" or "operations") => [],
             ("session", "run") or ("network", "verify" or "refresh" or "maintain" or "publish") or ("mailbox", "sync") => ["--bootstrap", "--registry"],
             ("contact", "request") => ["--bootstrap", "--registry", "--address", "--operation"],

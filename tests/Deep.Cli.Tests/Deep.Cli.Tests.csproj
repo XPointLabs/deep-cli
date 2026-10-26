@@ -14,5 +14,6 @@
     <ProjectReference Include="../../src/Deep.Cli/Deep.Cli.csproj" />
     <Using Include="Xunit" />
     <Compile Include="../../eng/DeliveryMeasurement.cs" Link="DeliveryMeasurement.cs" />
+    <Compile Include="../../eng/SecureStorageProviderBenchmark.cs" Link="SecureStorageProviderBenchmark.cs" />
   </ItemGroup>
 </Project>
