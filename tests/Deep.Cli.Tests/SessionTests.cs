@@ -80,6 +80,8 @@ public sealed class SessionTests
             Assert.Equal("", error.ToString());
         }
         using var reopened = WindowsProfile.Open(CommandLine.Parse(args));
+        reopened.Dispose(); reopened.Dispose();
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => reopened.Accounts.GetCurrentAsync());
     }
 
     [Fact]

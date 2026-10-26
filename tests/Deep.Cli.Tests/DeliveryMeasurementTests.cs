@@ -29,6 +29,9 @@ public sealed class DeliveryMeasurementTests
         controller.ObserveFrame(3, Frame(1, 1, "CommandAccepted"));
         ticks += 30; controller.ObserveFrame(2, Frame(2, 1, "RecipientDurableReadable", Message, Left));
         ticks += 25; controller.ObserveFrame(3, Frame(2, 1, "RecipientDurableReadable", Message, Right));
+        Assert.True(controller.HasRecipientObservation(1, 1, 2));
+        Assert.True(controller.HasRecipientObservation(1, 1, 3));
+        Assert.Equal(double.PositiveInfinity, controller.RecipientMilliseconds(1, 1, [2, 3], 2));
         var visibleBeforeStoreAndAck = controller.Sample(1, 1, [2, 3]);
         Assert.False(visibleBeforeStoreAndAck.Complete); // The sender outcome is still unknown.
         Assert.Null(visibleBeforeStoreAndAck.AllStoresMilliseconds);
@@ -44,6 +47,9 @@ public sealed class DeliveryMeasurementTests
         Assert.Equal(50, completedStores.FirstRecipientMilliseconds);
         Assert.Equal(75, completedStores.AllRecipientsMilliseconds);
         Assert.Equal(1075, completedStores.AllStoresMilliseconds);
+        Assert.Equal(50, controller.RecipientMilliseconds(1, 1, [2, 3], 2));
+        Assert.Equal(75, controller.RecipientMilliseconds(1, 1, [2, 3], 3));
+        Assert.Equal(double.PositiveInfinity, controller.RecipientMilliseconds(1, 1, [2, 3], 1));
         Assert.False(controller.Rejected);
     }
 
@@ -106,6 +112,7 @@ public sealed class DeliveryMeasurementTests
         controller.ObserveFrame(1, Frame(3, 1, "StoreQuorum", Message, Left));
         controller.ObserveFrame(2, Frame(1, 1, "CommandAccepted"));
         controller.ObserveFrame(2, Frame(2, 1, "RecipientDurableReadable", new string('f', 64), Left));
+        Assert.False(controller.HasRecipientObservation(1, 1, 2));
         Close(controller, 1, 4); Close(controller, 2, 3);
         Assert.False(controller.Sample(1, 1, [2]).Complete);
         Assert.Equal(double.PositiveInfinity, controller.Sample(1, 1, [2]).FirstRecipientMilliseconds);
@@ -170,6 +177,47 @@ public sealed class DeliveryMeasurementTests
     }
 
     [Fact]
+    public async Task ExplicitBoundedBudgetSupportsTheDeclaredEngineeringPopulationWithoutChangingDefault()
+    {
+        Assert.Equal(4096, new DeliveryEventController().MaximumEvents);
+        var controller = new DeliveryEventController(8192);
+        await Register(controller, 1);
+        for (var i = 1; i <= 5000; i++)
+        {
+            Assert.Equal(i, controller.BeginCommand(1));
+            controller.ObserveFrame(1, Frame(i, i, "CommandAccepted"));
+        }
+        Close(controller, 1, 5001);
+        Assert.False(controller.Rejected);
+        using var summary = JsonDocument.Parse(JsonSerializer.Serialize(controller.StreamSummary()));
+        Assert.Equal(5001, summary.RootElement[0].GetProperty("receivedFrames").GetInt64());
+        Assert.Equal(0, summary.RootElement[0].GetProperty("dropped").GetInt64());
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(100001)]
+    public void DiagnosticBudgetOutsideTheClosedHardBoundRejectsBeforeAttachingStreams(int maximumEvents) =>
+        Assert.Throws<ArgumentOutOfRangeException>(() => new DeliveryEventController(maximumEvents));
+
+    [Fact]
+    public async Task ReceiverAckFailureDoesNotEraseAValidClosedDurableVisibleObservation()
+    {
+        var controller = new DeliveryEventController();
+        await Register(controller, 1, 2);
+        controller.BeginCommand(1); controller.BeginCommand(2);
+        controller.ObserveFrame(1, Frame(1, 1, "CommandAccepted"));
+        controller.ObserveFrame(1, Frame(2, 1, "NativeOutboxDurable", Message, Left));
+        controller.ObserveFrame(1, Frame(3, 1, "StoreQuorum", Message, Left));
+        controller.ObserveFrame(2, Frame(1, 1, "CommandAccepted"));
+        controller.ObserveFrame(2, Frame(2, 1, "RecipientDurableReadable", Message, Left));
+        controller.CompleteCommand(1, 1, 0); controller.CompleteCommand(2, 1, 6);
+        Close(controller, 1, 4); Close(controller, 2, 3);
+        Assert.True(controller.Sample(1, 1, [2]).Complete);
+        Assert.True(double.IsFinite(controller.RecipientMilliseconds(1, 1, [2], 2)));
+    }
+
+    [Fact]
     public async Task CompleteFramesWithoutMandatoryTerminalCannotQualify()
     {
         var controller = new DeliveryEventController();
@@ -216,6 +264,8 @@ public sealed class DeliveryMeasurementTests
         var controller = new DeliveryEventController();
         await controller.Attach(1, new StringReader(output.ToString()));
         Assert.True(controller.Rejected);
+        using var summary = JsonDocument.Parse(JsonSerializer.Serialize(controller.StreamSummary()));
+        Assert.Equal(1, summary.RootElement[0].GetProperty("dropped").GetInt64());
         Assert.Equal(double.PositiveInfinity, controller.Sample(1, 1, [2]).AllRecipientsMilliseconds);
     }
 

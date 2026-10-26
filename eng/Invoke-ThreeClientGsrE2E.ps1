@@ -51,9 +51,13 @@ $scenarioPath = $PSCommandPath
 $scenarioHash = (Get-FileHash -LiteralPath $scenarioPath -Algorithm SHA256).Hash
 $sessionModulePath = Join-Path $PSScriptRoot 'CliSession.psm1'
 $sessionModuleHash = (Get-FileHash -LiteralPath $sessionModulePath -Algorithm SHA256).Hash
+$cohortModulePath=Join-Path $PSScriptRoot 'GsrCohort.psm1'
+$cohortModuleHash=(Get-FileHash -LiteralPath $cohortModulePath -Algorithm SHA256).Hash
+Import-Module $cohortModulePath -Force
 function Require-ScenarioInputs {
     if ((Get-FileHash -LiteralPath $scenarioPath -Algorithm SHA256).Hash -cne $scenarioHash -or
-        (Get-FileHash -LiteralPath $sessionModulePath -Algorithm SHA256).Hash -cne $sessionModuleHash) { throw 'Scenario inputs changed.' }
+        (Get-FileHash -LiteralPath $sessionModulePath -Algorithm SHA256).Hash -cne $sessionModuleHash -or
+        (Get-FileHash -LiteralPath $cohortModulePath -Algorithm SHA256).Hash -cne $cohortModuleHash) { throw 'Scenario inputs changed.' }
 }
 function Runtime-Fingerprint {
     $root = [IO.Path]::GetDirectoryName($exe) + [IO.Path]::DirectorySeparatorChar
@@ -68,6 +72,7 @@ $runtimeHash = Runtime-Fingerprint
 [void](New-Item -ItemType Directory -Path $run)
 Copy-Item -LiteralPath $scenarioPath -Destination (Join-Path $run 'scenario.ps1')
 Copy-Item -LiteralPath $sessionModulePath -Destination (Join-Path $run 'CliSession.psm1')
+Copy-Item -LiteralPath $cohortModulePath -Destination (Join-Path $run 'GsrCohort.psm1')
 if ((Get-FileHash -LiteralPath (Join-Path $run 'scenario.ps1') -Algorithm SHA256).Hash -cne $scenarioHash) { throw 'Scenario archive differs.' }
 Compress-Archive -LiteralPath ([IO.Path]::GetDirectoryName($exe)) -DestinationPath (Join-Path $run 'runtime.zip') -CompressionLevel Fastest
 if ((Runtime-Fingerprint) -cne $runtimeHash) { throw 'Runtime changed during archive.' }
@@ -143,9 +148,7 @@ function Invoke-Client([string]$phase, [string]$profile, [string[]]$command, [in
 function Operation([string]$purpose) { [Convert]::ToHexStringLower([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes('Deep/CLI/GroupQA/20261018/'+$network+'/'+$AliceProfile+'/'+$BobProfile+'/'+$CarolProfile+'/'+$purpose))) }
 function Group-Head([string]$phase, [string]$profile) {
     $list = Invoke-Client $phase $profile @('group','list')
-    $heads = @($list.items | Where-Object { $_.Name -ceq $groupName })
-    Require ($heads.Count -eq 1) 'One exact named candidate group required; never silently select another group.'
-    return $heads[0]
+    return Select-GsrGroupHead $list.items $groupName
 }
 function Sync([string]$phase, [string]$profile) {
     $processed = 0; $tombstones = 0
@@ -169,11 +172,11 @@ function Ensure-Contact([string]$left,[string]$right) {
     $r = Invoke-Client 'pair-right-cold-list' $right @('contact','list')
     $common = @($l.contacts | Where-Object { $_.conversation -in @($r.contacts | ForEach-Object conversation) })
     Require ($common.Count -le 1) 'Ambiguous exact pair session.'
-    if ($common.Count -eq 1 -and $common[0].state -ceq 'PeerAcceptanceRetained' -and
-        @($r.contacts | Where-Object { $_.conversation -ceq $common[0].conversation -and $_.state -ceq 'LocalAcceptanceRetained' }).Count -eq 1) {
+    $retained=Select-GsrRetainedConversation $l.contacts $r.contacts
+    if ($null -ne $retained) {
         # Resume only the actual mutually consented retained pair. Every group
         # operation still independently rechecks current network/native consent.
-        $pairConversations[(Pair-Key $left $right)] = $common[0].conversation
+        $pairConversations[(Pair-Key $left $right)] = $retained
         return
     }
     Require ($SteadyStateRound -eq 0) 'Steady-state requires existing mutual contact consent; no setup repair.'
@@ -343,7 +346,7 @@ try {
     $leaseWaits=[long](($recoveries | Measure-Object leaseWaits -Sum).Sum)
     [ordered]@{schema='deep.cli.connected-gsr-e2e.v1';passed=$passed;startedUtc=$started;finishedUtc=[DateTime]::UtcNow;
         automaticStoreResumes=$storeResumes;automaticMailboxResumes=$mailboxResumes;automaticLeaseWaits=$leaseWaits;noOwnedUnknownRecovery=($storeResumes -eq 0 -and $mailboxResumes -eq 0);
-        runtimeSha256=$runtimeHash;scenarioSha256=$scenarioHash.ToLowerInvariant();sessionModuleSha256=$sessionModuleHash.ToLowerInvariant();sessionCloseFailed=$sessionCloseFailed;steps=@($steps.ToArray());
+        runtimeSha256=$runtimeHash;scenarioSha256=$scenarioHash.ToLowerInvariant();sessionModuleSha256=$sessionModuleHash.ToLowerInvariant();cohortModuleSha256=$cohortModuleHash.ToLowerInvariant();sessionCloseFailed=$sessionCloseFailed;steps=@($steps.ToArray());
         candidateAccounts=3;devicesPerAccount=1;persistentSessions=[bool]$PersistentSessions;groupRevision=$GroupRevision;steadyStateRound=$SteadyStateRound;reusedPublishedAccounts=[bool]$ReusePublishedAccounts;maximumExactAttempts=$(if($strictCommands){1}else{2});firstAttemptRequired=($strictCommands -and -not $RecoverIncompleteSteadyRound);recoveryRequired=[bool]$RecoverIncompleteSteadyRound;recoveryQualified=($passed -and $RecoverIncompleteSteadyRound -and -not $DeliveryOnly);recoveryDeliveryQualified=($passed -and $RecoverIncompleteSteadyRound -and $DeliveryOnly);deliveryOnly=[bool]$DeliveryOnly;deliveryLatencyQualified=($passed -and $DeliveryOnly -and -not $RecoverIncompleteSteadyRound);gsr1FunctionalQualified=($passed -and $SteadyStateRound -eq 0);steadyStateQualified=($passed -and $SteadyStateRound -gt 0 -and -not $RecoverIncompleteSteadyRound -and -not $DeliveryOnly);gsr1RetentionQualified=$false;devicesQualified=$false;releaseQualified=$false} |
         ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $run 'receipt.json') -Encoding utf8
     Write-Host ([pscustomobject]@{passed=$passed;commands=$steps.Count} | ConvertTo-Json -Compress)

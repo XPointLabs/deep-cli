@@ -60,7 +60,11 @@ internal sealed class WindowsProfile : IDisposable
                 throw new IOException("Profile reparse point rejected.");
     }
 
-    public void Dispose() { try { storage.Dispose(); } finally { protector.Dispose(); commandLease.Dispose(); } }
+    public void Dispose()
+    {
+        try { Accounts.Dispose(); }
+        finally { try { storage.Dispose(); } finally { protector.Dispose(); commandLease.Dispose(); } }
+    }
 
     // Platform envelope only, not a Deep wire record. DPAPI protects a fresh
     // per-write key, AES-GCM authenticates the entire aggregate on EVERY read.

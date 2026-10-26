@@ -90,10 +90,11 @@ function Close-CliSession {
 }
 
 function New-DeliveryEventController {
+    param([ValidateRange(1,100000)][int]$MaximumEvents=4096)
     if(-not ('Deep.Cli.Measurement.DeliveryEventController' -as [type])){
         Add-Type -Path (Join-Path $PSScriptRoot 'DeliveryMeasurement.cs')
     }
-    return [Deep.Cli.Measurement.DeliveryEventController]::new()
+    return [Deep.Cli.Measurement.DeliveryEventController]::new($MaximumEvents)
 }
 
 Export-ModuleMember -Function New-CliSession,Invoke-CliSession,Start-CliSessionCommand,Complete-CliSessionCommand,Close-CliSession,New-DeliveryEventController

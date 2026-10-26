@@ -460,8 +460,9 @@ Missing/failed samples retain positive infinity;
 exit, and a failed/timed-out or unfinished sender remains infinity even if a
 recipient became visible. `Invoke`/`Complete` return the controller command
 ordinal used by `Sample`; response completion never supplies its timestamp.
-The finite4096-event run bound requires a fresh
-controller per independent run.
+The default4096-event run bound requires a fresh controller per independent run.
+The engineering driver supplies its declared budget explicitly (hard maximum
+100000), records stream counts/drop facts, and rejects overflow without truncation.
 
 Current phases are `NativeOutboxDurable`, `StoreQuorum` and
 `RecipientDurableReadable`. Native outbox timing describes the committed
@@ -473,3 +474,15 @@ instrumentation does not qualify warm-online latency or replace the sprint's
 short progress proof and subsequent acceptance runs.
 The [P0 checkpoint](docs/testing/cli-durable-visibility-events-2026-10-26.md)
 records exact receipts, review corrections and remaining limits.
+
+`eng/Invoke-ThreeClientDeliveryEngineering.ps1` prepares a bounded concurrent
+engineering run in PowerShell7.6.5: four complete rounds/twelve group messages on
+the retained three profiles, default group revision11/cursor60. It rejects stale
+cohort state and uses only existing Shared send/receive commands, without setup
+repair or automatic reauthoring. Its full population and per-role/directed-pair
+results retain failures as infinity. Large qualification runs remain unavailable.
+See the [driver contract](docs/testing/cli-concurrent-engineering-driver.md).
+This driver has not yet been executed against the retained accounts.
+Command responses expose `nativeStorageWork` separately from semantic events.
+Costs sum across native operations; working/archive inventory fields are explicit
+maxima across their authenticated observations, never total retained authority.

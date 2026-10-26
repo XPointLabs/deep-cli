@@ -79,6 +79,7 @@ internal static class Program
                 encoded["networkWork"] = JsonSerializer.SerializeToNode(networkWork.Snapshot());
                 encoded["runtimeWork"] = JsonSerializer.SerializeToNode(runtimeWork.Snapshot());
                 encoded["persistenceWork"] = JsonSerializer.SerializeToNode(persistenceWork.Snapshot());
+                encoded["nativeStorageWork"] = JsonSerializer.SerializeToNode(persistenceWork.NativeSnapshot());
                 encoded["recoveryWork"] = JsonSerializer.SerializeToNode(RecoverySnapshot());
                 if (session is not null) encoded["sessionWork"] = JsonSerializer.SerializeToNode(session.Snapshot());
                 await output.WriteLineAsync(encoded.ToJsonString());
@@ -103,7 +104,7 @@ internal static class Program
         catch (OperationCanceledException) { return await FailAsync(error, "cancelled", 130); }
         catch (CliBusinessException failure)
         {
-            await error.WriteLineAsync(JsonSerializer.Serialize(new { status = "error", code = "business-operation-failed", diagnostic = failure.ClosedDiagnostic(), protectionWork = work.Snapshot(), networkWork = networkWork.Snapshot(), runtimeWork = runtimeWork.Snapshot(), persistenceWork = persistenceWork.Snapshot(), recoveryWork = RecoverySnapshot(), sessionWork = session?.Snapshot() }));
+            await error.WriteLineAsync(JsonSerializer.Serialize(new { status = "error", code = "business-operation-failed", diagnostic = failure.ClosedDiagnostic(), protectionWork = work.Snapshot(), networkWork = networkWork.Snapshot(), runtimeWork = runtimeWork.Snapshot(), persistenceWork = persistenceWork.Snapshot(), nativeStorageWork = persistenceWork.NativeSnapshot(), recoveryWork = RecoverySnapshot(), sessionWork = session?.Snapshot() }));
             return ct.IsCancellationRequested ? 130 : 6;
         }
         catch (ArgumentException) { return await FailAsync(error, "invalid-arguments", 2); }

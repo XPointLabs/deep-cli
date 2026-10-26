@@ -17,13 +17,19 @@ public sealed class DeliveryEventController
     private readonly object gate = new();
     private readonly Func<long> clock;
     private readonly long frequency;
+    private readonly int maximumEvents;
     private readonly Dictionary<int, StreamState> streams = new();
     private readonly List<Row> rows = new();
     private bool rejected;
     public bool Rejected { get { lock (gate) return rejected; } }
+    public int MaximumEvents => maximumEvents;
     public DeliveryEventController() : this(Stopwatch.GetTimestamp, Stopwatch.Frequency) { }
-    internal DeliveryEventController(Func<long> clock, long frequency)
-    { this.clock = clock; this.frequency = frequency; }
+    public DeliveryEventController(int maximumEvents) : this(Stopwatch.GetTimestamp, Stopwatch.Frequency, maximumEvents) { }
+    internal DeliveryEventController(Func<long> clock, long frequency, int maximumEvents = 4096)
+    {
+        if (maximumEvents is < 1 or > 100000) throw new ArgumentOutOfRangeException(nameof(maximumEvents));
+        this.clock = clock; this.frequency = frequency; this.maximumEvents = maximumEvents;
+    }
 
     public Task Attach(int client, TextReader reader)
     {
@@ -44,7 +50,7 @@ public sealed class DeliveryEventController
     {
         lock (gate)
         {
-            if (!streams.TryGetValue(client, out var stream) || stream.Submitted >= 4096)
+            if (!streams.TryGetValue(client, out var stream) || stream.Submitted >= maximumEvents)
                 throw new ArgumentException("Attached bounded controller role required.");
             return ++stream.Submitted;
         }
@@ -102,11 +108,11 @@ public sealed class DeliveryEventController
             // Timestamp before parsing. No source-process/wall-clock timestamps
             // or response completion times participate in the measured path.
             var timestamp = clock();
-            if (rejected) return;
             try
             {
                 if (!streams.TryGetValue(client, out var stream) || frame.Length > 512)
                     throw new InvalidDataException();
+                stream.Frames++;
                 using var document = JsonDocument.Parse(frame, new JsonDocumentOptions { MaxDepth = 2 });
                 var root = document.RootElement;
                 if (root.ValueKind != JsonValueKind.Object) throw new InvalidDataException();
@@ -120,14 +126,20 @@ public sealed class DeliveryEventController
                 var phase = root.GetProperty("phase").GetString();
                 var message = root.GetProperty("messageHash").GetString();
                 var delivery = root.GetProperty("deliveryHash").GetString();
-                if (stream.Closed || sequence != stream.Sequence + 1 || timestamp < stream.Timestamp) throw new InvalidDataException();
                 if (phase == "StreamClosed")
                 {
-                    if (names.Count != 7 || command != 0 || message != "" || delivery != "" || root.GetProperty("dropped").GetInt64() != 0)
+                    var dropped = root.GetProperty("dropped").GetInt64();
+                    if (names.Count != 7 || command != 0 || message != "" || delivery != "" || sequence <= 0 || dropped < 0 || dropped >= sequence)
+                        throw new InvalidDataException();
+                    stream.TerminalSeen = true; stream.ReportedDropped = dropped; stream.ReportedSequence = sequence;
+                    if (rejected) return; // Keep closed loss diagnostics without restoring qualification.
+                    if (stream.Closed || dropped != 0 || sequence != stream.Sequence + 1 || timestamp < stream.Timestamp)
                         throw new InvalidDataException();
                     stream.Closed = true; stream.Sequence = sequence; stream.Timestamp = timestamp; return;
                 }
-                if (names.Count != 6 || names.Contains("dropped") || command <= 0 || rows.Count >= 4096) throw new InvalidDataException();
+                if (rejected) return;
+                if (stream.Closed || sequence != stream.Sequence + 1 || timestamp < stream.Timestamp) throw new InvalidDataException();
+                if (names.Count != 6 || names.Contains("dropped") || command <= 0 || rows.Count >= maximumEvents) throw new InvalidDataException();
                 if (phase == "CommandAccepted")
                 {
                     if (command != stream.Command + 1 || message != "" || delivery != "") throw new InvalidDataException();
@@ -179,6 +191,31 @@ public sealed class DeliveryEventController
         }
     }
 
+    // Progress only, never a finite sample or a product Delivered status. The
+    // engineering driver uses this to stop successful bounded receive polling.
+    public bool HasRecipientObservation(int sender, long command, int recipient)
+    {
+        lock (gate)
+        {
+            if (rejected) return false;
+            var hashes = rows.Where(row => row.Client == sender && row.Command == command && row.Phase == "NativeOutboxDurable")
+                .Select(row => row.MessageHash).Distinct(StringComparer.Ordinal).ToArray();
+            return hashes.Length == 1 && rows.Any(row => row.Client == recipient && row.MessageHash == hashes[0] && row.Phase == "RecipientDurableReadable");
+        }
+    }
+
+    public double RecipientMilliseconds(int sender, long command, int[] recipients, int recipient)
+    {
+        lock (gate)
+        {
+            if (!recipients.Contains(recipient) || !Sample(sender, command, recipients).Complete) return double.PositiveInfinity;
+            var accepted = rows.Single(row => row.Client == sender && row.Command == command && row.Phase == "CommandAccepted");
+            var hash = rows.First(row => row.Client == sender && row.Command == command && row.Phase == "NativeOutboxDurable").MessageHash;
+            var visible = rows.Single(row => row.Client == recipient && row.MessageHash == hash && row.Phase == "RecipientDurableReadable");
+            return (visible.Timestamp - accepted.Timestamp) * 1000.0 / frequency;
+        }
+    }
+
     public static double NearestRank(double[] samples, double percentile)
     {
         if (samples == null || samples.Length == 0 || !double.IsFinite(percentile) || percentile <= 0 || percentile > 1 ||
@@ -187,10 +224,22 @@ public sealed class DeliveryEventController
         return sorted[(int)Math.Ceiling(percentile * sorted.Length) - 1];
     }
 
+    public object StreamSummary()
+    {
+        lock (gate) return streams.OrderBy(pair => pair.Key).Select(pair => new
+        {
+            role = pair.Key, receivedFrames = pair.Value.Frames, acceptedCommands = pair.Value.Command,
+            recordedSequence = pair.Value.Sequence, terminalSeen = pair.Value.TerminalSeen,
+            reportedSequence = pair.Value.ReportedSequence, dropped = pair.Value.ReportedDropped,
+            closed = pair.Value.Closed, eof = pair.Value.Eof
+        }).ToArray();
+    }
+
     private sealed class StreamState
     {
-        internal long Sequence, Command, Timestamp, Submitted;
-        internal bool Closed, Eof;
+        internal long Sequence, Command, Timestamp, Submitted, Frames;
+        internal long? ReportedDropped, ReportedSequence;
+        internal bool Closed, Eof, TerminalSeen;
         internal readonly HashSet<string> Seen = new(StringComparer.Ordinal);
         internal readonly Dictionary<long, int> Outcomes = new();
     }
