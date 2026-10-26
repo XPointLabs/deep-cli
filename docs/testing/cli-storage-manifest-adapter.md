@@ -148,3 +148,60 @@ physical storage traffic or release acceptance. No retained account enrollment,
 connected send or network request occurred. Later root NEXT-SPRINT/DR-0176
 retirement-mapping documentation edits were made after terminal/freeze release;
 they do not change these runtimes or retroactively enter captured gate hashes.
+
+## Bounded path-buffer follow-up
+
+Shared changed only the Windows physical-name buffer from 32768 to 512 characters
+with bounded growth. The identity predicate, callbacks, writes and counters stayed
+unchanged. The long-path growth, LocalApplicationData and wrong-parent cases
+passed in
+`../deep-client-shared/artifacts/dr0176-path-buffer-20261026-01/terminal.json`:
+Release build/native exits 0, zero warnings/errors, 3 PASS/0 FAIL/0 SKIP and 2267
+inputs unchanged. CLI product code/tests did not change; CLI29 was not repeated.
+
+The identical benchmark helpers then completed another matched pair, all 141 rows
+successful per provider and native exits 0:
+
+- `artifacts/p1-storage-benchmark-20261026-baseline05/baseline05.terminal.json`:
+  35 inputs unchanged.
+- `artifacts/p1-storage-benchmark-20261026-candidate02/publish01/terminal.json`:
+  fresh Latency win-arm64 `--no-restore` publish, zero warnings/errors and 2125
+  source inputs unchanged.
+- `artifacts/p1-storage-benchmark-20261026-candidate02/candidate02.terminal.json`:
+  2159 source/runtime inputs unchanged; software at
+  `artifacts/p1-storage-candidate-20261026-02/runtime/`.
+
+All nine latency comparisons still regress. Allocation reduction from the buffer
+change does not close the underlying filesystem/authority amplification. Cells
+remain aggregate → manifest, with the same sample counts and operation definitions
+as the first pair:
+
+| Capacity | Operation | ms | Managed read KiB | Native Unprotect | Allocated MiB |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 16 | single | 0.300 → 6.417 | 45.6 → 6.6 | 1 → 1 | 0.10 → 0.17 |
+| 16 | batch | 0.310 → 7.126 | 45.6 → 7.7 | 1 → 1 | 0.10 → 0.22 |
+| 16 | atomic cycle | 15.227 → 279.708 | 91.3 → 248.7 | 2 → 43 | 0.46 → 6.31 |
+| 256 | single | 0.910 → 5.691 | 1010.5 → 97.3 | 1 → 1 | 2.06 → 0.42 |
+| 256 | batch | 0.812 → 7.027 | 1010.5 → 98.4 | 1 → 1 | 2.06 → 0.46 |
+| 256 | atomic cycle | 16.464 → 337.779 | 2021.1 → 3544.2 | 2 → 43 | 10.14 → 17.72 |
+| 1024 | single | 2.319 → 6.175 | 4098.3 → 387.5 | 1 → 1 | 8.06 → 1.21 |
+| 1024 | batch | 3.273 → 7.571 | 4098.3 → 388.6 | 1 → 1 | 8.06 → 1.26 |
+| 1024 | atomic cycle | 83.771 → 340.778 | 8196.6 → 14090.0 | 2 → 43 | 40.53 → 54.92 |
+
+Raw read counts/bytes and native admissions are unchanged from candidate01,
+including 43 Unprotect, 109 manifest reads and 30 object reads per atomic cycle.
+For example, candidate allocations at capacity 16 fall from 1,342,856 to 181,640
+bytes for a single read; capacity-1024 atomic allocations fall from 97,202,360 to
+57,593,208 bytes. These memory improvements are separate from latency acceptance.
+
+| Capacity | Seed ms | First cold admission ms | Median cold reopen ms |
+| ---: | ---: | ---: | ---: |
+| 16 | 23.425 → 456.367 | 4.536 → 26.995 | 8.255 → 24.914 |
+| 256 | 4.998 → 6267.344 | 9.065 → 354.408 | 6.329 → 344.012 |
+| 1024 | 13.218 → 27212.551 | 8.081 → 1322.022 | 14.378 → 1286.182 |
+
+Full scalar evidence is
+`artifacts/p1-storage-benchmark-20261026-candidate02/comparison-baseline05-candidate02.json`.
+No retained enrollment, connected send, network access, activation, delivery/p95
+or performance acceptance follows from this iteration. P1.2 remains separate;
+the measured closed-operation amplification still needs correction.
