@@ -1,7 +1,9 @@
 # Concurrent engineering driver
 
 `eng/Invoke-ThreeClientDeliveryEngineering.ps1` (PowerShell7.6.5) prepares the next bounded source
-scenario. It has not been run against the retained cohort. It requires an existing
+scenario. The concurrent message scenario has not been run against the retained
+cohort; the separate local preflight/maintenance checkpoint is recorded below.
+It requires an existing
 Windows CLI runtime and the real public bootstrap/Registry inputs; it never builds
 or publishes its own runtime.
 
@@ -81,3 +83,40 @@ exit 0. The 2112 captured source inputs stayed unchanged during the build and 22
 source/binary/normative inputs stayed unchanged during tests. The focused filter
 covered delivery measurement, persistence diagnostics and session lifecycle. This
 is focused acceptance only; the retained live scenario and full gate remain unrun.
+
+Local diagnostic preparation retained both publication receipts under
+`artifacts/concurrent-engineering-driver-20261026/`: `publish01/terminal.json`
+records native exit 0 but rejected input preservation because RID restore changed
+four tracked lockfiles. Their generated patches/hashes and exact restoration to
+the captured baseline remain in `publish01/lock-restoration.json`. Fresh
+`publish02/terminal.json` used `--no-restore`, native exit 0 and all 2110 source
+inputs unchanged. Its Release win-arm64 Latency runtime is
+`artifacts/concurrent-engineering-runtime-20261026-02/`; this is diagnostic
+publication, without release or performance acceptance. The preceding local Node
+Build/Up/Verify succeeded, but its preservation wrapper remains unqualified:
+`ExactMountBindingsUnchanged=false`, with the exact mount diff unavailable.
+The original receipt and closed annotation are
+`../deep-devops/artifacts/deep-dev-current-node-upgrade-20261026-01/terminal.json`
+and the sibling `preservation-annotation.json`; all three supported native actions
+exited 0 while the preservation wrapper exited 1.
+Preserved named volume identities, online keys and the older six containers do
+not establish complete mount preservation.
+
+`preflight01/receipt.json` confirmed all three retained profiles at 180 history
+items/60 local commands, revision 11, Active epoch 2, three members and matching
+consent. All six route directions had expired advertisement/update intervals and
+no retained route fault. The separately authorized existing `ConnectionCycle`
+stopped in `maintenance01/receipt.json`: role 1 publication succeeded in 47,591 ms;
+role 2 `NetworkPublish` failed with business exit 6 after 36,519 ms, CPU 11,641 ms,
+closed check `ProtectedState / RouteTimePMS2NotBefore`
+(`maintenance01/failure-4.json`). The complete maintenance process took 89,855 ms
+(`maintenance01.native.json`). These are maintenance durations, not warm delivery
+latency. Successful publication and the failed role's pending work remain retained.
+
+`blocked01.terminal.json` records three planned messages, zero authored, no
+diagnostic execution and all 2110 source inputs unchanged through terminal;
+the next shared cursor remains 60. Visibility/ACK timing and byte traffic are
+unobserved. The runtime inventory is `blocked01.runtime.json`; file-length-only
+before/after observations are `profile-metadata-pre01.json` and
+`profile-metadata-after-blocked01.json`. No reset, reauthoring, automatic repeat,
+second preflight or message round followed the failure.
