@@ -78,7 +78,8 @@ Require-Inputs
 $population|ConvertTo-Json -Depth 4|Set-Content -LiteralPath (Join-Path $run 'population.json') -Encoding utf8
 $controller=New-DeliveryEventController -MaximumEvents ([int]$eventBudget)
 $sessions=@{};$pending=@{};$steps=[Collections.Generic.List[object]]::new();$pairs=@{}
-$script:commandFailed=$false;$cohortValidated=$false;$closeFailed=$false;$inputsUnchanged=$true;$started=[DateTime]::UtcNow
+$script:commandFailed=$false;$script:measurementRejected=$false;$cohortValidated=$false;$closeFailed=$false;$inputsUnchanged=$true;$started=[DateTime]::UtcNow
+$lateDispositions=[Collections.Generic.List[object]]::new()
 function Require([bool]$ok,[string]$message,[string]$code='AssertionRejected'){
     if(-not $ok){Record-Failure $code $script:activePhase;throw $message}
 }
@@ -148,10 +149,14 @@ function Read-ClosedFailure($result){
 }
 function Start-Command([int]$role,[string]$phase,[string[]]$arguments){
     $script:activePhase=$phase
+    Require (-not $script:commandFailed) 'A stopped measurement cannot submit another command.'
     Require (-not $pending.ContainsKey($role)) 'One outstanding command per role required.'
     try{$handle=Start-CliSessionCommand $sessions[$role] ($arguments+@('--profile',$profiles[$role-1],'--network',$network))}
     catch{Record-Failure 'CommandSubmissionRejected' $phase;throw}
-    $pending[$role]=[pscustomobject]@{Handle=$handle;Phase=$phase;Watch=[Diagnostics.Stopwatch]::StartNew()}
+    # This driver submits only group send as a thirty-minute product command.
+    # All its other commands use Program.CommandTimeout (five minutes).
+    $productBudget=if($phase -ceq 'send'){1800000}else{300000}
+    $pending[$role]=[pscustomobject]@{Handle=$handle;Phase=$phase;Watch=[Diagnostics.Stopwatch]::StartNew();ProductBudgetMilliseconds=$productBudget}
     return $handle
 }
 function Complete-Command([int]$role,[int]$budget){
@@ -162,7 +167,7 @@ function Complete-Command([int]$role,[int]$budget){
         $response=Complete-CliSessionCommand $sessions[$role] $item.Handle $budget
         $result=$response.Result
         $row=[ordered]@{role=$role;phase=$item.Phase;commandOrdinal=$response.CommandOrdinal;exit=$response.ExitCode;commandMilliseconds=$item.Watch.ElapsedMilliseconds;cpuMilliseconds=$response.ProcessorMilliseconds}
-        foreach($field in @('networkWork','runtimeWork','persistenceWork','nativeStorageWork','storageWork','protectionWork','sessionWork')){
+        foreach($field in @('networkWork','runtimeWork','persistenceWork','nativeStorageWork','storageWork','protectionWork','sessionWork','completed','processed','tombstones','hasMore')){
             if($result.PSObject.Properties.Name -contains $field){$row[$field]=$result.$field}
         }
         if($response.ExitCode -ne 0){
@@ -184,7 +189,7 @@ function Complete-Command([int]$role,[int]$budget){
         $recovered=$null -ne $recovery -and ($recovery.storeResumes -ne 0 -or $recovery.mailboxResumes -ne 0 -or $recovery.leaseWaits -ne 0)
         if($null -ne $recovery){$row['recoveryWork']=$recovery}
         $steps.Add([pscustomobject]$row)
-        if($recovered){Record-Failure 'RecoveryDetected' $item.Phase;$script:commandFailed=$true;return $null}
+        if($recovered){Record-Failure 'RecoveryDetected' $item.Phase;$script:measurementRejected=$true;$script:commandFailed=$true;return $null}
         return $result
     }catch{
         $script:commandFailed=$true
@@ -193,6 +198,17 @@ function Complete-Command([int]$role,[int]$budget){
         $steps.Add([pscustomobject]@{role=$role;phase=$item.Phase;commandOrdinal=$item.Handle.CommandOrdinal;exit=$(if($code -ceq 'CommandTimeout'){130}else{1});failureCode=$code;commandMilliseconds=$item.Watch.ElapsedMilliseconds})
         return $null
     }finally{$pending.Remove($role)}
+}
+function Collect-AdmittedCommands{
+    # Observe only existing handles. Never receive, resume or author new work.
+    # Each child's own original cancellation/signed/hop bounds remain in force.
+    foreach($role in @($pending.Keys)){
+        $item=$pending[$role];$remaining=[Math]::Max(1,$item.ProductBudgetMilliseconds-[int]$item.Watch.ElapsedMilliseconds)
+        $before=$steps.Count;[void](Complete-Command $role $remaining)
+        foreach($row in @($steps|Select-Object -Skip $before)){
+            $lateDispositions.Add([pscustomobject]@{role=$row.role;phase=$row.phase;commandOrdinal=$item.Handle.CommandOrdinal;exit=$row.exit;commandMilliseconds=$row.commandMilliseconds;productBudgetMilliseconds=$item.ProductBudgetMilliseconds;remainingBudgetAtCollectionMilliseconds=$remaining})
+        }
+    }
 }
 function Call([int]$role,[string]$phase,[string[]]$arguments){
     [void](Start-Command $role $phase $arguments)
@@ -257,7 +273,7 @@ try{
         # product background scheduler, business retry or history-based clock.
         while($watch.ElapsedMilliseconds -lt $SampleBudgetMilliseconds){
             if($controller.Rejected){
-                Record-Failure 'MeasurementStreamRejected' 'receive-ack';$sample.Outcome='MeasurementRejected';$script:commandFailed=$true;break
+                Record-Failure 'MeasurementStreamRejected' 'receive-ack';$sample.Outcome='MeasurementRejected';$script:measurementRejected=$true;$script:commandFailed=$true;break
             }
             foreach($role in @($pending.Keys)){
                 if($pending[$role].Handle.Read.IsCompleted){
@@ -309,6 +325,7 @@ try{
     Record-Failure $code $script:activePhase;$script:commandFailed=$true
 }
 finally{
+    if($script:measurementRejected){Collect-AdmittedCommands}
     # Never restart a failed host or reissue group send. Close retains the
     # original Shared-owned operation; interrupted streams cannot qualify.
     foreach($role in @($sessions.Keys)){try{Close-CliSession $sessions[$role]}catch{Record-Failure 'StreamClosureRejected' 'session-close';$closeFailed=$true}}
@@ -318,7 +335,7 @@ finally{
         $recipients=[int[]]@(1..3|Where-Object {$_ -ne $sample.SenderRole})
         $metric=$controller.Sample($sample.SenderRole,$sample.CommandOrdinal,$recipients)
         $observed=$metric.Complete -and -not $closeFailed -and $inputsUnchanged
-        $finite=$sample.Outcome -ceq 'Success' -and $metric.Complete -and -not $closeFailed -and $inputsUnchanged
+        $finite=$sample.Outcome -ceq 'Success' -and -not $script:measurementRejected -and $metric.Complete -and -not $closeFailed -and $inputsUnchanged
         if(-not $finite -and $sample.Outcome -ceq 'Success'){Record-Failure 'MissingMeasurementObservation' 'measurement-finalization'}
         $recipientSamples=@(foreach($recipient in $recipients){
             $readMilliseconds=$controller.HistoryReadMilliseconds($sample.SenderRole,$sample.CommandOrdinal,$recipients,$recipient)
@@ -353,7 +370,7 @@ finally{
         }
     }
     $passed=$cohortValidated -and -not $script:commandFailed -and -not $closeFailed -and $inputsUnchanged -and -not $controller.Rejected -and @($samples|Where-Object {$_.positiveInfinity -or $_.historyReadPositiveInfinity}).Count -eq 0
-    [ordered]@{schema='deep.cli.delivery-engineering.v1';passed=$passed;failurePhase=$script:failurePhase;failureCode=$script:failureCode;startedUtc=$started;finishedUtc=[DateTime]::UtcNow;plannedSamples=$population.Count;rounds=$Rounds;startingCursor=$ExpectedCursor;expectedFinalCursor=$ExpectedCursor+$Rounds;groupRevision=$GroupRevision;cohortValidated=$cohortValidated;sampleBudgetMilliseconds=$SampleBudgetMilliseconds;emptyPollIntervalMilliseconds=$EmptyPollIntervalMilliseconds;maximumNonemptyReceivePages=$MaximumReceivePages;maximumReceiveRequestsPerSample=$maximumReceiveRequests;diagnosticEventBudget=$eventBudget;streams=$controller.StreamSummary();inputHashes=$inputHashes;runtimeSha256=$runtimeHash;inputsUnchanged=$inputsUnchanged;sessionCloseFailed=$closeFailed;controllerRejected=$controller.Rejected;samples=$samples.ToArray();perRole=$roleStats.ToArray();perDirectedPair=$pairStats.ToArray();steps=$steps.ToArray();tombstoneAckTimingObserved=$false;applicationReceiptTimingObserved=$false;productBackgroundQualified=$false;warmLatencyQualified=$false;releaseQualified=$false}|ConvertTo-Json -Depth 14|Set-Content -LiteralPath (Join-Path $run 'receipt.json') -Encoding utf8
+    [ordered]@{schema='deep.cli.delivery-engineering.v1';passed=$passed;failurePhase=$script:failurePhase;failureCode=$script:failureCode;startedUtc=$started;finishedUtc=[DateTime]::UtcNow;plannedSamples=$population.Count;rounds=$Rounds;startingCursor=$ExpectedCursor;expectedFinalCursor=$ExpectedCursor+$Rounds;groupRevision=$GroupRevision;cohortValidated=$cohortValidated;measurementRejected=$script:measurementRejected;alreadyAdmittedDispositions=$lateDispositions.ToArray();sampleBudgetMilliseconds=$SampleBudgetMilliseconds;emptyPollIntervalMilliseconds=$EmptyPollIntervalMilliseconds;maximumNonemptyReceivePages=$MaximumReceivePages;maximumReceiveRequestsPerSample=$maximumReceiveRequests;diagnosticEventBudget=$eventBudget;streams=$controller.StreamSummary();inputHashes=$inputHashes;runtimeSha256=$runtimeHash;inputsUnchanged=$inputsUnchanged;sessionCloseFailed=$closeFailed;controllerRejected=$controller.Rejected;samples=$samples.ToArray();perRole=$roleStats.ToArray();perDirectedPair=$pairStats.ToArray();steps=$steps.ToArray();tombstoneAckTimingObserved=$false;applicationReceiptTimingObserved=$false;productBackgroundQualified=$false;warmLatencyQualified=$false;releaseQualified=$false}|ConvertTo-Json -Depth 14|Set-Content -LiteralPath (Join-Path $run 'receipt.json') -Encoding utf8
     Write-Host ([pscustomobject]@{passed=$passed;plannedSamples=$population.Count;submittedSamples=@($population|Where-Object Submitted).Count;finiteSamples=@($samples|Where-Object {-not $_.positiveInfinity}).Count}|ConvertTo-Json -Compress)
 }
 if(-not $passed){throw 'Engineering run failed; retain original submitted work and receipt. No automatic restart or reauthoring.'}

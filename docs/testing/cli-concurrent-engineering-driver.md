@@ -58,6 +58,13 @@ missing or unsubmitted samples remain positive infinity (`null` plus the explici
 flag in JSON), and nearest-rank retains their full denominator. A failure stops
 future authoring; submitted Shared-owned operations and the role/sequence/session
 command ordinals are retained. Hosts are never silently restarted.
+After a recovery-assisted result or measurement-stream rejection, the driver
+collects only commands already submitted to those hosts, using each command's
+remaining original product budget (group send thirty minutes, other driver
+commands five minutes). It submits no further send, receive, or history command.
+Their returned counts and late dispositions are recorded separately. The run
+and its full performance population remain failed/infinite even if those
+original commands complete successfully and all streams close cleanly.
 The receipt preserves the first closed failure phase/code, distinguishing cohort,
 route expiry/fault, changed inputs, command error/timeout, invalid/recovery-assisted
 results and assertion failure without recording raw exceptions or identifiers.

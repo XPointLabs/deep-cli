@@ -118,4 +118,39 @@ Require ($source.Contains("`$row['failure']=Read-ClosedFailure `$result") -and $
     $source.Contains('historyReadP95Milliseconds=') -and $source.Contains('observed=$observedBlock')) 'Closed failures and distinct complete read/projection populations are mandatory.'
 $legacy=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-ThreeClientGsrE2E.ps1') -Raw
 Require ($legacy.Contains('Select-GsrGroupHead') -and $legacy.Contains('Select-GsrRetainedConversation') -and $legacy.Contains('cohortModuleSha256=')) 'Both GSR drivers must use the captured pure selectors.'
+& {
+    foreach($name in @('Record-Failure','Start-Command','Complete-Command','Collect-AdmittedCommands')){
+        $fn=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name},$true))
+        Require ($fn.Count -eq 1) 'One production pending-command owner required.'
+        . ([scriptblock]::Create($fn[0].Extent.Text))
+    }
+    $pending=@{};$sessions=@{1=[pscustomobject]@{Role=1};2=[pscustomobject]@{Role=2}}
+    $steps=[Collections.Generic.List[object]]::new();$lateDispositions=[Collections.Generic.List[object]]::new()
+    $profiles=@('unit-left','unit-right');$network='unit-network'
+    $script:submittedHandles=0;$script:collectedBudgets=[Collections.Generic.List[int]]::new()
+    $script:commandFailed=$false;$script:measurementRejected=$false;$script:failureCode='None';$script:failurePhase='None'
+    function Start-CliSessionCommand($session,$arguments){
+        $script:submittedHandles++
+        [pscustomobject]@{Read=$(if($session.Role -eq 1){[Threading.Tasks.Task]::CompletedTask}else{[Threading.Tasks.Task]::Delay(250)});CommandOrdinal=1}
+    }
+    function Complete-CliSessionCommand($session,$handle,[int]$budget){
+        $script:collectedBudgets.Add($budget)
+        if(-not $handle.Read.Wait($budget)){throw 'Original unit handle did not finish within its budget.'}
+        [pscustomobject]@{ExitCode=0;CommandOrdinal=1;ProcessorMilliseconds=0;Result=[pscustomobject]@{completed=2;recoveryWork=[pscustomobject]@{storeResumes=0L;mailboxResumes=$(if($session.Role -eq 1){1L}else{0L});leaseWaits=0L}}}
+    }
+    [void](Start-Command 1 'receive-ack' @('mailbox','sync'))
+    [void](Start-Command 2 'send' @('group','send'))
+    Require ($pending[1].ProductBudgetMilliseconds -eq 300000 -and $pending[2].ProductBudgetMilliseconds -eq 1800000) 'Original product deadlines must match the submitted command.'
+    [void](Complete-Command 1 1000)
+    Require ($script:commandFailed -and $script:measurementRejected -and $script:failureCode -ceq 'RecoveryDetected' -and $pending.Count -eq 1) 'Recovered success must stop measurement while its slower sibling remains admitted.'
+    Reject {Start-Command 1 'send' @('group','send')}
+    Collect-AdmittedCommands
+    Require ($script:submittedHandles -eq 2 -and $pending.Count -eq 0 -and $lateDispositions.Count -eq 1 -and $lateDispositions[0].role -eq 2 -and $lateDispositions[0].exit -eq 0) 'Collection must finish only the existing sibling without another send or drain.'
+    Require ($script:collectedBudgets[1] -gt 0 -and $script:collectedBudgets[1] -le 1800000 -and $steps[-1].completed -eq 2) 'Late disposition must retain the real response under the remaining original budget.'
+    $sample=[pscustomobject]@{Outcome='Success'};$metric=[pscustomobject]@{Complete=$true};$closeFailed=$false;$inputsUnchanged=$true
+    $finiteAssignment=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -ceq '$finite'},$true))
+    Require ($finiteAssignment.Count -eq 1) 'One actual qualification predicate required.'
+    . ([scriptblock]::Create($finiteAssignment[0].Extent.Text))
+    Require (-not $finite -and $script:commandFailed) 'Successful late completion must preserve failed/infinite measurement qualification.'
+}
 [pscustomobject]@{passed=$true;checks=$checks;edition=$PSVersionTable.PSEdition;version=$PSVersionTable.PSVersion.ToString();profilesOpened=0;networkCalls=0}|ConvertTo-Json -Compress
