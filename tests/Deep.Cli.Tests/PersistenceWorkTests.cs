@@ -12,7 +12,8 @@ public sealed class PersistenceWorkTests
         using var work = new PersistenceWork();
         var type = typeof(Deep.Client.Shared.Services.DeepIdV2AccountService).Assembly
             .GetType("Deep.Client.Shared.Persistence.ClientPersistenceTiming", throwOnError: true)!;
-        var source = type.GetField("Log", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null);
+        var lazy = type.GetField("Log", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+        var source = lazy.GetType().GetProperty("Value")!.GetValue(lazy);
         var emit = type.GetMethod("NativeCounts")!;
         using var output = new StringWriter();
         await using (var semantic = new DeliveryDiagnostics(output))
@@ -61,27 +62,30 @@ public sealed class PersistenceWorkTests
         Directory.CreateDirectory(root);
         try
         {
+            using var protector = new WindowsProfile.CurrentUserProtector();
+            using var storage = await JournaledDeepSecureStorage.CreateNewAsync(Path.Combine(root, "PRIVATE.dss"), protector);
+            var before = storage.ReadWorkSnapshot();
             using var work = new PersistenceWork();
-            using var storage = new JournaledDeepSecureStorage(Path.Combine(root, "PRIVATE.dss"), new RejectProtector());
             using var absent = await storage.ReadOwnedAsync("deep.store.v2.current-account");
             Assert.Null(absent);
-            var json = JsonSerializer.Serialize(work.Snapshot());
+            // DSS2 returns closed scalar work after the owner read; standalone
+            // storage does not dispatch persistence EventSource callbacks.
+            Assert.Equal("[]", JsonSerializer.Serialize(work.Snapshot()));
+            var json = JsonSerializer.Serialize(SecureStorageWork.Delta(storage.ReadWorkSnapshot(), before));
             Assert.DoesNotContain(root, json);
             Assert.DoesNotContain("PRIVATE", json);
             Assert.DoesNotContain("deep.store.v2", json);
             using var parsed = JsonDocument.Parse(json);
-            var row = Assert.Single(parsed.RootElement.EnumerateArray());
-            Assert.Equal("StorageLoad", row.GetProperty("phase").GetString());
-            Assert.Equal(1, row.GetProperty("count").GetInt64());
-            Assert.True(row.GetProperty("totalMilliseconds").GetInt64() >= 0);
-            Assert.Equal(4, row.EnumerateObject().Count());
+            Assert.Equal(13, parsed.RootElement.EnumerateObject().Count());
+            Assert.Equal(2, parsed.RootElement.GetProperty("manifestReads").GetInt64());
+            Assert.True(parsed.RootElement.GetProperty("manifestProtectedBytesRead").GetInt64() > 0);
+            Assert.True(parsed.RootElement.GetProperty("manifestPlaintextBytesDecoded").GetInt64() > 0);
+            Assert.Equal(1, parsed.RootElement.GetProperty("unprotectCalls").GetInt64());
+            Assert.Equal(0, parsed.RootElement.GetProperty("objectReads").GetInt64());
+            Assert.Equal(0, parsed.RootElement.GetProperty("manifestWrites").GetInt64());
+            Assert.All(parsed.RootElement.EnumerateObject(), property => Assert.True(property.Value.GetInt64() >= 0));
         }
         finally { Directory.Delete(root, recursive: true); }
     }
 
-    private sealed class RejectProtector : IDeepSecretProtector
-    {
-        public byte[] Protect(ReadOnlySpan<byte> plaintext) => throw new InvalidOperationException("No encryption for absent state.");
-        public byte[] Unprotect(ReadOnlySpan<byte> protectedBytes) => throw new InvalidOperationException("No decryption for absent state.");
-    }
 }

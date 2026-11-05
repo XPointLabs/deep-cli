@@ -1,8 +1,12 @@
 # Concurrent engineering driver
 
 `eng/Invoke-ThreeClientDeliveryEngineering.ps1` (PowerShell7.6.5) prepares the next bounded source
-scenario. The concurrent message scenario has not been run against the retained
-cohort; the separate local preflight/maintenance checkpoint is recorded below.
+scenario. The runtime09 attempt at
+`artifacts/retained-goal-20261105-09/engineering01/receipt.json` passed cohort
+preflight, submitted sender1/sequence61 and stopped on a recipient command error;
+it has zero finite samples. That original submitted work remains retained. The
+separate normal-history read timing below is added source pending focused/live
+evidence; the historical checkpoint below does not qualify it.
 It requires an existing
 Windows CLI runtime and the real public bootstrap/Registry inputs; it never builds
 or publishes its own runtime.
@@ -40,8 +44,14 @@ The event controller keeps its4096 default. This driver explicitly supplies the
 event budget derived from its predeclared sample/request caps, rejects any budget
 above100000 before opening profiles, and reports exact stream counts/drop facts.
 
-Only actual durable observations supply measurement time. History checks after
-each balanced round validate content/counts and never set a visible timestamp.
+Actual durable projection events keep their existing measurement time. After a
+recipient's Sync completes, the driver issues ordinary `group messages` through
+that same serial session. It requires exactly one remote-author item with the
+planned text and sequence in RAM. The controller separately measures from the
+sender's accepted command to the successful history response release, using its
+same monotonic clock. This includes any Sync/ACK wait and normal history read;
+an ACK timestamp never substitutes for the read result. No message text enters
+the receipt. Balanced-round history checks still only validate content/counts.
 The receipt includes every planned sample, each directed recipient sample,
 per-role p95 and all six directed-pair p95 values. Failed, recovery-assisted,
 missing or unsubmitted samples remain positive infinity (`null` plus the explicit
@@ -51,6 +61,9 @@ command ordinals are retained. Hosts are never silently restarted.
 The receipt preserves the first closed failure phase/code, distinguishing cohort,
 route expiry/fault, changed inputs, command error/timeout, invalid/recovery-assisted
 results and assertion failure without recording raw exceptions or identifiers.
+Failed steps also retain only whitelisted CLI code/category/check and bounded
+code-owned method/IL frames from the already closed diagnostic. Unknown values
+become closed placeholders; exception text, extra fields and paths are excluded.
 An independently valid closed-stream durable-visible observation remains in the
 sample's `observed` block if a later receive/ACK command fails. The qualification
 sample and per-role/directed-pair percentiles still count that failure as infinity;
@@ -59,6 +72,10 @@ the raw observation is not a success or sender Delivered status.
 Finite samples require matching current native-outbox, Store and durable-visible
 events, successful sender completion, unchanged inputs, and clean drop-free
 terminal/EOF from every host. Store timings are separate from first/all recipients.
+The separate `historyReadResultMilliseconds` recipient fields, first/all history
+result fields and `historyReadP95Milliseconds` role/pair fields keep the same
+complete population and explicit infinity rules. Missing, failed, duplicate or
+uncorrelated history results cannot become finite through a projection event.
 Tombstone ACK and application receipt timings are explicitly unobserved; command
 durations for receive+ACK are labelled separately. The driver always reports
 warm-latency/product-background/release qualification false.

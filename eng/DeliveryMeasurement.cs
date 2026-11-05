@@ -20,6 +20,7 @@ public sealed class DeliveryEventController
     private readonly int maximumEvents;
     private readonly Dictionary<int, StreamState> streams = new();
     private readonly List<Row> rows = new();
+    private readonly Dictionary<(int Sender, long Command, int Recipient), long> historyReads = new();
     private bool rejected;
     public bool Rejected { get { lock (gate) return rejected; } }
     public int MaximumEvents => maximumEvents;
@@ -62,6 +63,37 @@ public sealed class DeliveryEventController
         {
             if (!streams.TryGetValue(client, out var stream) || command <= 0 || command > stream.Submitted ||
                 !stream.Outcomes.TryAdd(command, exitCode)) rejected = true;
+            else stream.CompletedAt.Add(command, clock());
+        }
+    }
+
+    // Called only after the normal group-messages result contains exactly the
+    // planned text/sequence/remote-author tuple. No payload enters this reader.
+    public void RecordHistoryRead(int sender, long command, int recipient, long readCommand)
+    {
+        lock (gate)
+        {
+            if (sender is < 1 or > 3 || recipient is < 1 or > 3 || sender == recipient || command <= 0 ||
+                !streams.TryGetValue(sender, out var senderStream) || command > senderStream.Submitted || historyReads.Count >= maximumEvents ||
+                !streams.TryGetValue(recipient, out var stream) ||
+                !stream.Outcomes.TryGetValue(readCommand, out var exit) || exit != 0 ||
+                !historyReads.TryAdd((sender, command, recipient), readCommand)) rejected = true;
+        }
+    }
+
+    public double HistoryReadMilliseconds(int sender, long command, int[] recipients, int recipient)
+    {
+        lock (gate)
+        {
+            if (!recipients.Contains(recipient) || !Sample(sender, command, recipients).Complete ||
+                !historyReads.TryGetValue((sender, command, recipient), out var readCommand)) return double.PositiveInfinity;
+            var accepted = rows.Single(row => row.Client == sender && row.Command == command && row.Phase == "CommandAccepted");
+            var hash = rows.First(row => row.Client == sender && row.Command == command && row.Phase == "NativeOutboxDurable").MessageHash;
+            var visible = rows.Single(row => row.Client == recipient && row.MessageHash == hash && row.Phase == "RecipientDurableReadable");
+            var read = rows.SingleOrDefault(row => row.Client == recipient && row.Command == readCommand && row.Phase == "CommandAccepted");
+            var completed = streams[recipient].CompletedAt[readCommand];
+            return read is null || read.Timestamp < visible.Timestamp || completed < read.Timestamp
+                ? double.PositiveInfinity : (completed - accepted.Timestamp) * 1000.0 / frequency;
         }
     }
 
@@ -242,6 +274,7 @@ public sealed class DeliveryEventController
         internal bool Closed, Eof, TerminalSeen;
         internal readonly HashSet<string> Seen = new(StringComparer.Ordinal);
         internal readonly Dictionary<long, int> Outcomes = new();
+        internal readonly Dictionary<long, long> CompletedAt = new();
     }
     private sealed record Row(int Client, long Command, string Phase, string MessageHash, string DeliveryHash, long Timestamp);
 }

@@ -39,8 +39,8 @@ $population=@(New-GsrEngineeringPopulation -Rounds $Rounds -Cursor $ExpectedCurs
 $maximumReceiveRequests=[int][Math]::Ceiling($SampleBudgetMilliseconds/$EmptyPollIntervalMilliseconds)+$MaximumReceivePages+1
 # Each receive request emits one command admission; each authored sample adds
 # sender admission plus two outbox/two Store/two visible events. Bound all
-# preflight/round validation commands separately; terminals are counted by role.
-$eventBudget=[long]$population.Count*(2L*$maximumReceiveRequests+7L)+32L+6L*$Rounds
+# two ordinary history reads, preflight/round validation and role terminals.
+$eventBudget=[long]$population.Count*(2L*$maximumReceiveRequests+9L)+32L+6L*$Rounds
 if($eventBudget -gt 100000){throw 'Declared engineering population exceeds the diagnostic event budget.'}
 $network=(Get-Content -LiteralPath (Join-Path $BootstrapDirectory 'deep-dev.json') -Raw|ConvertFrom-Json).networkIdHex.ToLowerInvariant()
 if($network -cnotmatch '^[0-9a-f]{32}$'){throw 'Explicit public network binding required.'}
@@ -99,6 +99,52 @@ function Read-RecoveryWork($result,[bool]$required){
     return [pscustomobject]@{storeResumes=[long]$work.storeResumes;mailboxResumes=[long]$work.mailboxResumes;leaseWaits=[long]$work.leaseWaits}
 }
 function Pair-Key([int]$left,[int]$right){(@($left,$right)|Sort-Object)-join ':'}
+function Require-CorrelatedHistory($result,[ulong]$sequence,[string]$text){
+    $matched=@($result.items|Where-Object {$_.text -is [string] -and $_.text -ceq $text -and
+        ($_.sequence -is [int] -or $_.sequence -is [long] -or $_.sequence -is [ulong]) -and $_.sequence -eq $sequence})
+    Require ($result.status -is [string] -and $result.status -ceq 'ok' -and $matched.Count -eq 1 -and
+        $matched[0].local -is [bool] -and -not $matched[0].local) 'Ordinary history must return exactly the correlated remote message.'
+}
+function Read-ClosedFailure($result){
+    # Copy only code-owned closed fields; never serialize the response/exception.
+    $codes=@('business-operation-failed','cancelled','invalid-arguments','platform-unavailable','protected-state-rejected','storage-unavailable-or-busy','storage-access-denied','operation-failed','account-missing')
+    $closed=[ordered]@{code='Unclassified'}
+    if($result.PSObject.Properties.Name -contains 'code' -and $result.code -cin $codes){$closed.code=$result.code}
+    if($result.PSObject.Properties.Name -notcontains 'diagnostic' -or $null -eq $result.diagnostic){return [pscustomobject]$closed}
+    $diagnostic=$result.diagnostic
+    $phases=@('LocalRead','Bootstrap','ContactRouteVerification','ContactRouteMaintenance','ContactRouteReintroduction','NetworkVerify','NetworkRefresh','NetworkMaintain','NetworkPublish','ContactRequest','ContactStop','ContactAccept','MailboxSync','TextQueue','TextSend','AttachmentPrepare','AttachmentSend','AttachmentQueue','AttachmentDownload','GroupWork')
+    $categories=@('OutcomeUnknown','ContactRetryExpired','Timeout','ProtectedState','HttpFailure','DirectoryRateLimited','DirectoryUnavailable','IoFailure','InvalidState','Cancelled','OperationRejected','ProtocolRejected','InvalidInput','Other','IngressRetryableBeforeForward','IngressRejectedBeforeForward')
+    $checks=@('Unclassified','EndpointPairNetworkChanged','EndpointPairDirectoryExpired','EndpointPairDirectoryFloorAdvanced','EndpointPairDirectoryExpiredBeforeHandoff','IngressMalformedFrame','IngressWrongOrigin','IngressSaturated','IngressUnavailable','PreKeysUnavailable','ClaimExpired','ClaimStaleBundle','ClaimRateLimited','ClaimConflict','ClaimOutcomeUnknown')
+    $checks+=@('Expired','RateLimited','StaleView','Conflict','OutcomeUnknown','SizeFailure','RecordTooLarge'|ForEach-Object {'GroupControl'+$_})
+    $checks+=@('Lifecycle','Network','Membership','Epoch','Issuer','Generation','IssuerWindow','RouteExpiry','Lifetime','Signature'|ForEach-Object {'Grant'+$_})
+    $checks+=@('GrantHorizon','GrantOverlap','RequestInterval','GrantStart','ResponseDeadline','IssuedBeforeRequest','IssuedAfterRequest','IssuedAfterCurrentUpper'|ForEach-Object {'RetainedRead'+$_})
+    foreach($artifact in @('XNA1','XNV1','XNH1','ADH1','DeviceCertificate','DCA1','PMT2','XRA1','PMS2','XRC1','XSS1','XIR1V2','XRR1','ThresholdAuthoring','ResolveRequest')){
+        foreach($reason in @('InvalidInterval','NotBefore','Expiry')){$checks+='RouteTime'+$artifact+$reason}
+    }
+    function Location($value){
+        $location=[ordered]@{method='Unavailable';il=-1}
+        if($null -ne $value -and $value.PSObject.Properties.Name -contains 'method' -and
+            $value.method -is [string] -and $value.method.Length -le 240 -and
+            $value.method -cmatch '\ADeep\.(Client\.Shared|Protocol)\.(?:[A-Za-z0-9_.+<>`]|g__[A-Za-z0-9_]+\|[0-9]+(?:_[0-9]+)?(?=>|\.|\z))+\z'){$location.method=$value.method}
+        if($null -ne $value -and $value.PSObject.Properties.Name -contains 'il' -and
+            ($value.il -is [int] -or $value.il -is [long]) -and $value.il -ge -1 -and $value.il -le 1048575){$location.il=$value.il}
+        [pscustomobject]$location
+    }
+    $phase='Unclassified'
+    if($diagnostic.PSObject.Properties.Name -contains 'phase' -and $diagnostic.phase -cin $phases){$phase=$diagnostic.phase}
+    $causes=@(if($diagnostic.PSObject.Properties.Name -contains 'causes'){
+        foreach($cause in @($diagnostic.causes|Select-Object -First 8)){
+            if($null -eq $cause){continue}
+            $location=Location $cause;$category='Other';$check='Unclassified'
+            if($cause.PSObject.Properties.Name -contains 'category' -and $cause.category -cin $categories){$category=$cause.category}
+            if($cause.PSObject.Properties.Name -contains 'check' -and $cause.check -cin $checks){$check=$cause.check}
+            $trail=@(if($cause.PSObject.Properties.Name -contains 'trail'){foreach($frame in @($cause.trail|Select-Object -First 8)){Location $frame}})
+            [pscustomobject]@{category=$category;check=$check;method=$location.method;il=$location.il;trail=$trail}
+        }
+    })
+    $closed['diagnostic']=[pscustomobject]@{phase=$phase;causes=$causes}
+    [pscustomobject]$closed
+}
 function Start-Command([int]$role,[string]$phase,[string[]]$arguments){
     $script:activePhase=$phase
     Require (-not $pending.ContainsKey($role)) 'One outstanding command per role required.'
@@ -119,6 +165,7 @@ function Complete-Command([int]$role,[int]$budget){
             if($result.PSObject.Properties.Name -contains $field){$row[$field]=$result.$field}
         }
         if($response.ExitCode -ne 0){
+            $row['failure']=Read-ClosedFailure $result
             Record-Failure $(if($response.ExitCode -eq 130){'CommandTimeout'}else{'CommandError'}) $item.Phase
             $steps.Add([pscustomobject]$row);$script:commandFailed=$true;return $null
         }
@@ -203,8 +250,8 @@ try{
         $sample.Submitted=$true;$sample.CommandOrdinal=$handle.CommandOrdinal;$sample.Outcome='Incomplete'
         [pscustomobject]@{round=$sample.Round;senderRole=$sender;sequence=$sample.Sequence;commandOrdinal=$sample.CommandOrdinal}|
             ConvertTo-Json -Compress|Add-Content -LiteralPath (Join-Path $run 'submissions.jsonl') -Encoding utf8
-        $pages=@{};$more=@{};$requests=@{};$nextEmptyPoll=@{}
-        foreach($role in $recipients){$pages[$role]=0;$requests[$role]=1;$nextEmptyPoll[$role]=0L;$more[$role]=$false;[void](Start-Command $role 'receive-ack' (@('mailbox','sync')+$networkArgs))}
+        $pages=@{};$more=@{};$requests=@{};$nextEmptyPoll=@{};$historyRead=@{}
+        foreach($role in $recipients){$historyRead[$role]=$false;$pages[$role]=0;$requests[$role]=1;$nextEmptyPoll[$role]=0L;$more[$role]=$false;[void](Start-Command $role 'receive-ack' (@('mailbox','sync')+$networkArgs))}
         # Explicit bounded engineering scheduling of the existing API, not a
         # product background scheduler, business retry or history-based clock.
         while($watch.ElapsedMilliseconds -lt $SampleBudgetMilliseconds){
@@ -213,8 +260,13 @@ try{
             }
             foreach($role in @($pending.Keys)){
                 if($pending[$role].Handle.Read.IsCompleted){
+                    $phase=$pending[$role].Phase;$ordinal=$pending[$role].Handle.CommandOrdinal
                     $result=Complete-Command $role ([Math]::Max(1,$SampleBudgetMilliseconds-[int]$watch.ElapsedMilliseconds))
-                    if($role -ne $sender -and $null -ne $result){
+                    if($phase -ceq 'history-read' -and $null -ne $result){
+                        Require-CorrelatedHistory $result $sample.Sequence $text
+                        $controller.RecordHistoryRead($sender,$sample.CommandOrdinal,$role,$ordinal)
+                        $historyRead[$role]=$true
+                    }elseif($role -ne $sender -and $null -ne $result){
                         Require ($result.processed -ge 0 -and $result.processed -eq $result.tombstones) 'Receive/ACK result incomplete.'
                         Require (-not $result.hasMore -or $result.processed -gt 0) 'Non-final mailbox page made no durable progress.'
                         $more[$role]=[bool]$result.hasMore
@@ -227,6 +279,12 @@ try{
             }
             if($script:commandFailed){$sample.Outcome='CommandOrRecoveryFailure';break}
             foreach($role in $recipients){
+                if(-not $pending.ContainsKey($role) -and -not $historyRead[$role] -and $controller.HasRecipientObservation($sender,$sample.CommandOrdinal,$role)){
+                    # Ordinary same-session read: Sync has returned, including ACK.
+                    # Correlate the actual result in RAM; never use ACK as its clock.
+                    [void](Start-Command $role 'history-read' @('group','messages','--group',$group))
+                    continue
+                }
                 if(-not $pending.ContainsKey($role) -and $watch.ElapsedMilliseconds -ge $nextEmptyPoll[$role] -and
                     ($more[$role] -or -not $controller.HasRecipientObservation($sender,$sample.CommandOrdinal,$role))){
                     if($pages[$role] -ge $MaximumReceivePages -or $requests[$role] -ge $maximumReceiveRequests){
@@ -236,7 +294,7 @@ try{
                 }
             }
             if($script:commandFailed){break}
-            if(-not $pending.Count -and @($recipients|Where-Object {-not $controller.HasRecipientObservation($sender,$sample.CommandOrdinal,$_)}).Count -eq 0){$sample.Outcome='Success';break}
+            if(-not $pending.Count -and @($recipients|Where-Object {-not $historyRead[$_]}).Count -eq 0){$sample.Outcome='Success';break}
             Start-Sleep -Milliseconds 25
         }
         if($sample.Outcome -ne 'Success'){
@@ -262,25 +320,38 @@ finally{
         $finite=$sample.Outcome -ceq 'Success' -and $metric.Complete -and -not $closeFailed -and $inputsUnchanged
         if(-not $finite -and $sample.Outcome -ceq 'Success'){Record-Failure 'MissingMeasurementObservation' 'measurement-finalization'}
         $recipientSamples=@(foreach($recipient in $recipients){
-            [pscustomobject]@{recipientRole=$recipient;milliseconds=$(if($finite){$controller.RecipientMilliseconds($sample.SenderRole,$sample.CommandOrdinal,$recipients,$recipient)}else{$null});positiveInfinity=(-not $finite)}
+            $readMilliseconds=$controller.HistoryReadMilliseconds($sample.SenderRole,$sample.CommandOrdinal,$recipients,$recipient)
+            $readFinite=$finite -and [double]::IsFinite($readMilliseconds)
+            [pscustomobject]@{recipientRole=$recipient;milliseconds=$(if($finite){$controller.RecipientMilliseconds($sample.SenderRole,$sample.CommandOrdinal,$recipients,$recipient)}else{$null});positiveInfinity=(-not $finite);historyReadResultMilliseconds=$(if($readFinite){$readMilliseconds}else{$null});historyReadPositiveInfinity=(-not $readFinite)}
         })
+        $readFinite=$finite -and @($recipientSamples|Where-Object historyReadPositiveInfinity).Count -eq 0
+        if($finite -and -not $readFinite){Record-Failure 'MissingMeasurementObservation' 'history-read-finalization'}
+        $firstRead=$(if($readFinite){($recipientSamples.historyReadResultMilliseconds|Measure-Object -Minimum).Minimum}else{$null})
+        $allReads=$(if($readFinite){($recipientSamples.historyReadResultMilliseconds|Measure-Object -Maximum).Maximum}else{$null})
         $observedBlock=[pscustomobject]@{durableVisibleObserved=$observed;firstRecipientMilliseconds=$(if($observed){$metric.FirstRecipientMilliseconds}else{$null});allRecipientsMilliseconds=$(if($observed){$metric.AllRecipientsMilliseconds}else{$null})}
-        $samples.Add([pscustomobject]@{round=$sample.Round;senderRole=$sample.SenderRole;sequence=$sample.Sequence;commandOrdinal=$sample.CommandOrdinal;submitted=$sample.Submitted;outcome=$sample.Outcome;positiveInfinity=(-not $finite);observed=$observedBlock;firstRecipientMilliseconds=$(if($finite){$metric.FirstRecipientMilliseconds}else{$null});allRecipientsMilliseconds=$(if($finite){$metric.AllRecipientsMilliseconds}else{$null});nativeOutboxMilliseconds=$(if($finite){$metric.NativeOutboxMilliseconds}else{$null});allStoresMilliseconds=$(if($finite){$metric.AllStoresMilliseconds}else{$null});recipients=$recipientSamples})
+        $samples.Add([pscustomobject]@{round=$sample.Round;senderRole=$sample.SenderRole;sequence=$sample.Sequence;commandOrdinal=$sample.CommandOrdinal;submitted=$sample.Submitted;outcome=$sample.Outcome;positiveInfinity=(-not $finite);observed=$observedBlock;firstRecipientMilliseconds=$(if($finite){$metric.FirstRecipientMilliseconds}else{$null});allRecipientsMilliseconds=$(if($finite){$metric.AllRecipientsMilliseconds}else{$null});historyReadPositiveInfinity=(-not $readFinite);firstHistoryReadResultMilliseconds=$firstRead;allHistoryReadResultMilliseconds=$allReads;nativeOutboxMilliseconds=$(if($finite){$metric.NativeOutboxMilliseconds}else{$null});allStoresMilliseconds=$(if($finite){$metric.AllStoresMilliseconds}else{$null});recipients=$recipientSamples})
     }
     foreach($role in 1..3){
         $values=[double[]]@($samples|Where-Object {$_.senderRole -eq $role}|ForEach-Object {if($_.positiveInfinity){[double]::PositiveInfinity}else{[double]$_.allRecipientsMilliseconds}})
         $p95=[Deep.Cli.Measurement.DeliveryEventController]::NearestRank($values,.95)
-        $roleStats.Add([pscustomobject]@{senderRole=$role;population=$values.Count;p95Milliseconds=$(if([double]::IsFinite($p95)){$p95}else{$null});positiveInfinity=[double]::IsPositiveInfinity($p95)})
+        $readValues=[double[]]@($samples|Where-Object {$_.senderRole -eq $role}|ForEach-Object {if($_.historyReadPositiveInfinity){[double]::PositiveInfinity}else{[double]$_.allHistoryReadResultMilliseconds}})
+        $readP95=[Deep.Cli.Measurement.DeliveryEventController]::NearestRank($readValues,.95)
+        $roleStats.Add([pscustomobject]@{senderRole=$role;population=$values.Count;p95Milliseconds=$(if([double]::IsFinite($p95)){$p95}else{$null});positiveInfinity=[double]::IsPositiveInfinity($p95);historyReadP95Milliseconds=$(if([double]::IsFinite($readP95)){$readP95}else{$null});historyReadPositiveInfinity=[double]::IsPositiveInfinity($readP95)})
         foreach($recipient in @(1..3|Where-Object {$_ -ne $role})){
             $values=[double[]]@($samples|Where-Object {$_.senderRole -eq $role}|ForEach-Object {
                 $pair=@($_.recipients|Where-Object {$_.recipientRole -eq $recipient})[0]
                 if($pair.positiveInfinity){[double]::PositiveInfinity}else{[double]$pair.milliseconds}
             })
             $p95=[Deep.Cli.Measurement.DeliveryEventController]::NearestRank($values,.95)
-            $pairStats.Add([pscustomobject]@{senderRole=$role;recipientRole=$recipient;population=$values.Count;p95Milliseconds=$(if([double]::IsFinite($p95)){$p95}else{$null});positiveInfinity=[double]::IsPositiveInfinity($p95)})
+            $readValues=[double[]]@($samples|Where-Object {$_.senderRole -eq $role}|ForEach-Object {
+                $pair=@($_.recipients|Where-Object {$_.recipientRole -eq $recipient})[0]
+                if($pair.historyReadPositiveInfinity){[double]::PositiveInfinity}else{[double]$pair.historyReadResultMilliseconds}
+            })
+            $readP95=[Deep.Cli.Measurement.DeliveryEventController]::NearestRank($readValues,.95)
+            $pairStats.Add([pscustomobject]@{senderRole=$role;recipientRole=$recipient;population=$values.Count;p95Milliseconds=$(if([double]::IsFinite($p95)){$p95}else{$null});positiveInfinity=[double]::IsPositiveInfinity($p95);historyReadP95Milliseconds=$(if([double]::IsFinite($readP95)){$readP95}else{$null});historyReadPositiveInfinity=[double]::IsPositiveInfinity($readP95)})
         }
     }
-    $passed=$cohortValidated -and -not $script:commandFailed -and -not $closeFailed -and $inputsUnchanged -and -not $controller.Rejected -and @($samples|Where-Object positiveInfinity).Count -eq 0
+    $passed=$cohortValidated -and -not $script:commandFailed -and -not $closeFailed -and $inputsUnchanged -and -not $controller.Rejected -and @($samples|Where-Object {$_.positiveInfinity -or $_.historyReadPositiveInfinity}).Count -eq 0
     [ordered]@{schema='deep.cli.delivery-engineering.v1';passed=$passed;failurePhase=$script:failurePhase;failureCode=$script:failureCode;startedUtc=$started;finishedUtc=[DateTime]::UtcNow;plannedSamples=$population.Count;rounds=$Rounds;startingCursor=$ExpectedCursor;expectedFinalCursor=$ExpectedCursor+$Rounds;groupRevision=$GroupRevision;cohortValidated=$cohortValidated;sampleBudgetMilliseconds=$SampleBudgetMilliseconds;emptyPollIntervalMilliseconds=$EmptyPollIntervalMilliseconds;maximumNonemptyReceivePages=$MaximumReceivePages;maximumReceiveRequestsPerSample=$maximumReceiveRequests;diagnosticEventBudget=$eventBudget;streams=$controller.StreamSummary();inputHashes=$inputHashes;runtimeSha256=$runtimeHash;inputsUnchanged=$inputsUnchanged;sessionCloseFailed=$closeFailed;controllerRejected=$controller.Rejected;samples=$samples.ToArray();perRole=$roleStats.ToArray();perDirectedPair=$pairStats.ToArray();steps=$steps.ToArray();tombstoneAckTimingObserved=$false;applicationReceiptTimingObserved=$false;productBackgroundQualified=$false;warmLatencyQualified=$false;releaseQualified=$false}|ConvertTo-Json -Depth 14|Set-Content -LiteralPath (Join-Path $run 'receipt.json') -Encoding utf8
     Write-Host ([pscustomobject]@{passed=$passed;plannedSamples=$population.Count;submittedSamples=@($population|Where-Object Submitted).Count;finiteSamples=@($samples|Where-Object {-not $_.positiveInfinity}).Count}|ConvertTo-Json -Compress)
 }

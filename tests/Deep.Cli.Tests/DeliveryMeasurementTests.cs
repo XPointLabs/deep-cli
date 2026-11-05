@@ -217,6 +217,54 @@ public sealed class DeliveryMeasurementTests
         Assert.True(double.IsFinite(controller.RecipientMilliseconds(1, 1, [2], 2)));
     }
 
+    [Theory]
+    [InlineData("none")]
+    [InlineData("missing")]
+    [InlineData("failed-read")]
+    [InlineData("wrong-send")]
+    [InlineData("wrong-read")]
+    [InlineData("before-visible")]
+    [InlineData("duplicate")]
+    [InlineData("stream-failure")]
+    public async Task OrdinaryHistoryResultUsesControllerCompletionAndRequiresExactClosedCorrelation(string defect)
+    {
+        long ticks = 1000;
+        var controller = new DeliveryEventController(() => ticks, 1000);
+        await Register(controller, 1, 2);
+        controller.BeginCommand(1); controller.BeginCommand(2);
+        controller.ObserveFrame(1, Frame(1, 1, "CommandAccepted"));
+        controller.ObserveFrame(1, Frame(2, 1, "NativeOutboxDurable", Message, Left));
+        controller.ObserveFrame(1, Frame(3, 1, "StoreQuorum", Message, Left));
+        controller.CompleteCommand(1, 1, 0);
+        controller.ObserveFrame(2, Frame(1, 1, "CommandAccepted"));
+        ticks = 1010;
+        if (defect != "before-visible") controller.ObserveFrame(2, Frame(2, 1, "RecipientDurableReadable", Message, Left));
+        ticks = 1020; controller.CompleteCommand(2, 1, 0); // ACK result is not the read result.
+        Assert.Equal(2, controller.BeginCommand(2));
+        controller.ObserveFrame(2, Frame(defect == "before-visible" ? 2 : 3, 2, "CommandAccepted"));
+        if (defect == "before-visible")
+        {
+            ticks = 1030;
+            controller.ObserveFrame(2, Frame(3, 2, "RecipientDurableReadable", Message, Left));
+        }
+        ticks = 1050; controller.CompleteCommand(2, 2, defect == "failed-read" ? 6 : 0);
+        if (defect != "missing")
+            controller.RecordHistoryRead(1, defect == "wrong-send" ? 2 : 1, 2, defect == "wrong-read" ? 3 : 2);
+        if (defect == "duplicate") controller.RecordHistoryRead(1, 1, 2, 2);
+        Assert.Equal(double.PositiveInfinity, controller.HistoryReadMilliseconds(1, 1, [2], 2));
+        ticks = 10000; // Final reporting must not become the measured timestamp.
+        Close(controller, 1, 4);
+        controller.ObserveFrame(2, End(4, defect == "stream-failure" ? 1 : 0)); controller.EndInput(2);
+        Assert.Equal(defect == "none" ? 50 : double.PositiveInfinity,
+            controller.HistoryReadMilliseconds(1, 1, [2], 2));
+        if (defect == "none")
+        {
+            Assert.Equal(10, controller.RecipientMilliseconds(1, 1, [2], 2));
+            Assert.Equal(double.PositiveInfinity, controller.HistoryReadMilliseconds(1, 1, [2], 1));
+            Assert.False(controller.Rejected);
+        }
+    }
+
     [Fact]
     public async Task CompleteFramesWithoutMandatoryTerminalCannotQualify()
     {
@@ -288,6 +336,7 @@ public sealed class DeliveryMeasurementTests
         var binding = CommandLine.Parse(["session", "run", "--profile", "delivery-" + Guid.NewGuid().ToString("N")[..20],
             "--network", new string('1', 32), "--bootstrap", "public-bundle", "--registry", "https://localhost/", "--delivery-events", "true"]);
         var args = new[] { "account", "status", "--profile", binding.Profile, "--network", Convert.ToHexStringLower(binding.Network) };
+        using (await WindowsProfile.OpenAsync(CommandLine.Parse(["account", "create", .. args[2..], "--name", "Empty delivery-event fixture"]))) { }
         using var stdout = new StringWriter(); using var stderr = new StringWriter();
         Assert.Equal(0, await CliSession.RunAsync(binding, new StringReader(JsonSerializer.Serialize(args) + "\n"), stdout, default, stderr));
         using var response = JsonDocument.Parse(stdout.ToString());
