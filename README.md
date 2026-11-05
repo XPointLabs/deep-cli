@@ -1,30 +1,13 @@
 # Deep CLI
 
+Current architecture: [Deep / XPoint specification](../docs/architecture/README.md).
+
 Headless client for the current DID2 stack. Uses
 `deep-client-shared/Deep.Client.Shared.Production.csproj` and current Protocol;
 no MAUI workloads, emulator or device deployment for the inner development loop.
-Place this repository beside `deep-client-shared` and `deep-protocol`, as in the
-XPointLabs workspace. Requires Windows and .NET SDK10.0.301 initially.
-
-Private storage uses the [DR-0176](../docs/survival-program/decisions/DR-0176-bounded-protected-storage-inventory.md)
-manifest/object contract. `account create` explicitly initializes an empty private
-profile; ordinary commands require committed storage and do not initialize,
-convert or repair missing state. Existing aggregate profiles require the explicit
-standalone command `deep storage enroll --profile <alias> --network <hex>` under
-the same exclusive profile lock. Enrollment preserves logical slots and native
-account files; it cannot run inside `session run`. Retained conversion and
-activation remain gated. See the [storage adapter checkpoint](docs/testing/cli-storage-manifest-adapter.md)
-for lifecycle tests, actual I/O counters and the disposable provider benchmark.
-The measured manifest candidate is slower across the sampled operations and
-sizes; these checks do not establish a performance or retained-activation gate.
-
-Connected commands report `recoveryWork` separately from driver attempts: bounded
-Store/mailbox resumes and waits for protected retry leases. Recovery re-enters
-the original owned operation, never reruns queue/group creation or relaxes signed
-windows. See the [message/DTT checkpoint](docs/testing/cli-dtt-send-2026-10-19.md)
-for retained failures. The current
-[message latency checkpoint](docs/testing/cli-message-latency-2026-10-19.md)
-records the complete three-client comparison and remaining data-plane delays.
+Place this repository beside `deep-client-shared` and `deep-protocol`.
+The [current specification](../docs/architecture/README.md) describes the shared
+business path; [NEXT-SPRINT](../docs/NEXT-SPRINT.md) controls the next admitted run.
 After an uncertain effect, a still-active protected retry lease schedules only
 its adapter-captured remaining interval (at most35s), not another full35s after
 preparation. This timing hint never authorizes dispatch: the next owned attempt
@@ -217,9 +200,9 @@ PowerShell5.1; native source-test wrappers still select5.1 as the workspace requ
 After a completed cycle, `-GroupRevision 1` explicitly starts a separate named
 QA group without deleting the old group/history; never advance it to evade
 unknown work. Retry the same revision and its original `flush` operations.
-Current GSR1 evidence and remaining limits: [GSR checkpoint](docs/testing/cli-gsr-groups-2026-10-18.md).
-Historical ordinary-mailbox generation2 evidence: [three-CLI checkpoint](docs/testing/cli-three-groups-2026-10-18.md)
-and the earlier [two-CLI checkpoint](docs/testing/cli-groups-2026-10-18.md).
+Current GSR1 evidence and remaining limits: [GSR checkpoint](https://github.com/XPointLabs/deep-cli/blob/7605758e033cadf29a7ae31aa91d994722c6ed22/docs/testing/cli-gsr-groups-2026-10-18.md).
+Historical ordinary-mailbox generation2 evidence: [three-CLI checkpoint](https://github.com/XPointLabs/deep-cli/blob/7605758e033cadf29a7ae31aa91d994722c6ed22/docs/testing/cli-three-groups-2026-10-18.md)
+and the earlier [two-CLI checkpoint](https://github.com/XPointLabs/deep-cli/blob/7605758e033cadf29a7ae31aa91d994722c6ed22/docs/testing/cli-groups-2026-10-18.md).
 
 The initial network adapter consumes the existing **public** `deep-dev-current`
 bundle (`deep-dev.json`, genesis XNA1/DTS1/ADH1 and public `dev-ca.crt`). It reads
@@ -280,7 +263,7 @@ checks independent full-output hashes, cold exact retries, duplicate polls and
 overwrite refusal. It reuses retained operations and refuses to replace a
 completed offer whose original selector is no longer available. Receipts contain
 hashes/counts/closed phases only, not message IDs, manifests or source paths.
-See [attachment evidence](docs/testing/cli-attachments-2026-10-18.md).
+See [attachment evidence](https://github.com/XPointLabs/deep-cli/blob/7605758e033cadf29a7ae31aa91d994722c6ed22/docs/testing/cli-attachments-2026-10-18.md).
 
 Pass `-ExecutablePath artifacts/<publish>/deep.exe` to test an immutable published
 runtime; the driver archives it and its scenario under the fresh run directory.
@@ -291,7 +274,7 @@ revision, never advance it to evade pending/unknown work. Revision0 retains
 the original test selectors. `eng/Test-AttachmentScenario.ps1` checks the
 selection/identity and pre-I/O runtime guards without starting clients.
 Current full-group and retained-attachment evidence:
-[checkpoint](docs/testing/cli-full-retained-and-attachments-2026-10-23.md).
+[checkpoint](https://github.com/XPointLabs/deep-cli/blob/7605758e033cadf29a7ae31aa91d994722c6ed22/docs/testing/cli-full-retained-and-attachments-2026-10-23.md).
 This driver does not silently repair expired peer routes: retain the SAME asset
 and offer, perform the existing authenticated route-maintenance workflow, then
 retry. A maintenance-assisted recovery is reported separately from first-attempt
@@ -360,36 +343,12 @@ This covers multi-hop business preparation; individual transport deadlines and
 all signed proof/request/grant lifetimes remain independently enforced. A
 cancelled/unknown attempt is retained, never converted to successful delivery.
 
-## Next, in order
+## Verification and retained scenario modes
 
-The authoritative sprint/acceptance plan is
-[CLI-first in XPointLabs](../docs/architecture/IMPLEMENTATION-PLAN-V1.md#cli-first--первый-приоритет-внутри-s05):
-shared headless composition → network/contact/consent → bidirectional text and
-recovery → files/images → groups. Network commands are implemented; connected
-contact/text acceptance is still being debugged, not claimed complete.
-Do not interpret local account creation as network, message or device E2E PASS.
-Two CLI profiles will use the real local Registry/three-node Docker topology,
-existing TLS/authority/native crypto and persistent storage. No mock-success path.
-
-Run `dotnet test Deep.Cli.slnx --configuration Release -m:1` for the focused CLI
-suite. Full source/package gates and subsequent Windows/Android physical E2E
-remain required for release. This repository publishes no release automatically.
-
-## Initial account-slice evidence (2026-10-17)
-
-`artifacts/cli-account-20261017/focused-02`:12PASS/native0/0skip, no compiler
-warnings/errors, Windows PowerShell5.1 / SDK10.0.301. Includes real DPAPI tamper
-refusal and native DID2/account/device persistence, strict arguments, cancellation
-and refusal to overwrite an existing account. Initial `focused-01` failed before
-account creation because CLI incorrectly expected a32-byte network ID; current
-CLI uses the existing16-byte DID2 network ID. The failed receipt is retained.
-
-`process-01/receipt.json`: separately launched actual `deep.exe` processes created
-two distinct accounts, reopened the same public address, rejected duplicate
-creation without changing the original, and omitted the address from status.
-All six checks passed/native0. Output captured only in memory; the receipt has
-booleans and executable SHA256, no account addresses, keys or private paths.
-This qualifies **local account behavior only**, not network/contact/device E2E.
+The [current specification](../docs/architecture/README.md) defines the architecture;
+[NEXT-SPRINT](../docs/NEXT-SPRINT.md) owns unfinished work. Run
+`dotnet test Deep.Cli.slnx --configuration Release -m:1` for the CLI suite.
+Full source/package and Windows/Android physical gates remain separate.
 
 For isolated steady-state group latency, the existing three-client scenario
 accepts `-ReusePublishedAccounts -SteadyStateRound N` with the exact retained
@@ -485,7 +444,7 @@ they cannot be inferred from these phases. The adapter adds no receive scheduler
 The existing sequential E2E drivers remain command-duration baselines. This P0
 instrumentation does not qualify warm-online latency or replace the sprint's
 short progress proof and subsequent acceptance runs.
-The [P0 checkpoint](docs/testing/cli-durable-visibility-events-2026-10-26.md)
+The [P0 checkpoint](https://github.com/XPointLabs/deep-cli/blob/7605758e033cadf29a7ae31aa91d994722c6ed22/docs/testing/cli-durable-visibility-events-2026-10-26.md)
 records exact receipts, review corrections and remaining limits.
 
 `eng/Invoke-ThreeClientDeliveryEngineering.ps1` prepares a bounded concurrent

@@ -1,5 +1,7 @@
 # Deep CLI
 
+Current architecture: [Deep / XPoint specification](../docs/architecture/README.md).
+
 The workspace `../AGENTS.md` applies. This repository owns only console/platform
 adapters, isolated profiles and black-box CLI scenarios. Current sprint order
 and acceptance belong to `../docs/architecture/IMPLEMENTATION-PLAN-V1.md`.
