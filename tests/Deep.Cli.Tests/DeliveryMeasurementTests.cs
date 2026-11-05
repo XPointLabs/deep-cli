@@ -273,6 +273,74 @@ public sealed class DeliveryMeasurementTests
         Assert.True(controller.Rejected);
     }
 
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(6, true)]
+    [InlineData(0, false)]
+    public async Task OrdinaryReadObservationSurvivesFailedSenderOrMissingStoreWithoutQualifying(int senderExit, bool store)
+    {
+        long ticks = 1000;
+        var controller = new DeliveryEventController(() => ticks, 1000);
+        await Register(controller, 1, 2);
+        controller.BeginCommand(1); controller.BeginCommand(2);
+        controller.ObserveFrame(1, Frame(1, 1, "CommandAccepted"));
+        controller.ObserveFrame(1, Frame(2, 1, "NativeOutboxDurable", Message, Left));
+        if (store) controller.ObserveFrame(1, Frame(3, 1, "StoreQuorum", Message, Left));
+        controller.CompleteCommand(1, 1, senderExit);
+        controller.ObserveFrame(2, Frame(1, 1, "CommandAccepted"));
+        ticks = 1010; controller.ObserveFrame(2, Frame(2, 1, "RecipientDurableReadable", Message, Left));
+        controller.CompleteCommand(2, 1, 6); // A failed ACK cannot erase the ordinary history result.
+        controller.BeginCommand(2);
+        ticks = 1020; controller.ObserveFrame(2, Frame(3, 2, "CommandAccepted"));
+        ticks = 1050; controller.CompleteCommand(2, 2, 0);
+        controller.RecordHistoryRead(1, 1, 2, 2);
+        Assert.Equal(double.PositiveInfinity, controller.ObservedHistoryReadMilliseconds(1, 1, 2));
+        Close(controller, 1, store ? 4 : 3); Close(controller, 2, 4);
+        Assert.Equal(50, controller.ObservedHistoryReadMilliseconds(1, 1, 2));
+        Assert.Equal(senderExit == 0 && store ? 50 : double.PositiveInfinity,
+            controller.HistoryReadMilliseconds(1, 1, [2], 2));
+        Assert.False(controller.Rejected);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(6)]
+    public async Task DirectQueueAdmissionPrecedesDistinctDispatchAndIncludesAllAuthoringTime(int dispatchExit)
+    {
+        long ticks = 1000;
+        var controller = new DeliveryEventController(() => ticks, 1000);
+        await Register(controller, 1, 2);
+        controller.BeginCommand(1);
+        controller.ObserveFrame(1, Frame(1, 1, "CommandAccepted")); // Original queue admission.
+        ticks = 1040; controller.CompleteCommand(1, 1, 0);
+        controller.BeginCommand(1);
+        ticks = 1050; controller.ObserveFrame(1, Frame(2, 2, "CommandAccepted"));
+        controller.BindDirectDispatch(1, 1, 2);
+        ticks = 1060; controller.ObserveFrame(1, Frame(3, 2, "NativeOutboxDurable", Message, Left));
+        ticks = 1070; controller.ObserveFrame(1, Frame(4, 2, "StoreQuorum", Message, Left));
+        controller.CompleteCommand(1, 2, dispatchExit);
+        controller.BeginCommand(2);
+        controller.ObserveFrame(2, Frame(1, 1, "CommandAccepted"));
+        ticks = 1080; controller.ObserveFrame(2, Frame(2, 1, "RecipientDurableReadable", Message, Left));
+        controller.CompleteCommand(2, 1, 0);
+        controller.BeginCommand(2);
+        ticks = 1090; controller.ObserveFrame(2, Frame(3, 2, "CommandAccepted"));
+        ticks = 1100; controller.CompleteCommand(2, 2, 0);
+        controller.RecordHistoryRead(1, 1, 2, 2);
+        Assert.True(controller.HasRecipientObservation(1, 1, 2));
+        Close(controller, 1, 5); Close(controller, 2, 4);
+        Assert.Equal(100, controller.ObservedHistoryReadMilliseconds(1, 1, 2));
+        Assert.Equal(dispatchExit == 0 ? 100 : double.PositiveInfinity, controller.HistoryReadMilliseconds(1, 1, [2], 2));
+        if (dispatchExit == 0)
+        {
+            var sample = controller.Sample(1, 1, [2]);
+            Assert.Equal(60, sample.NativeOutboxMilliseconds);
+            Assert.Equal(70, sample.AllStoresMilliseconds);
+            Assert.Equal(80, sample.AllRecipientsMilliseconds);
+        }
+        Assert.False(controller.Rejected);
+    }
+
     [Fact]
     public async Task CleanClosureWithMissingCurrentStoreObservationStillCannotQualify()
     {

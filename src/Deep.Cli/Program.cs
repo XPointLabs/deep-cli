@@ -54,7 +54,7 @@ internal static class Program
             if (session is null && args is (["--help"] or []))
             {
                 await output.WriteLineAsync("deep <area> <command> --profile <alias> --network <32 lowercase hex> [options]\n" +
-                    "account create/status/address; storage enroll (standalone existing profile); network verify/refresh/maintain/publish; contact request/accept/stop/list/operations/route-health/route-verify/refresh-route/reintroduce-route; mailbox sync; message queue/send/list/pending; attachment prepare/queue/send/pending/operations/list/download; group create/invite/accept/advance/send/resume/flush/list/messages\n" +
+                    "account create/status/address; storage enroll (standalone existing profile); network verify/refresh/maintain/publish; contact request/accept/stop/list/operations/route-health/route-verify/refresh-route/reintroduce-route; mailbox sync/receive; message queue/send/list/recent/pending; attachment prepare/queue/send/pending/operations/list/download; group create/invite/accept/advance/send/resume/flush/list/messages/recent\n" +
                     "Network operations require --bootstrap <public dev bundle> --registry <canonical HTTPS origin>.\n" +
                     "request: --address --operation; accept: --conversation --operation; queue: --conversation --text; send: --conversation --operation --text.\n" +
                     "session run: bounded JSON argument arrays on stdin; one bound profile/network/bootstrap/origin, serial commands until EOF.\n" +

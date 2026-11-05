@@ -5,6 +5,7 @@ using Deep.Client.Shared.Services;
 using Deep.Client.Shared.Services.AccountDirectoryV2;
 using Deep.Protocol.Identity;
 using Deep.Protocol.ApplicationCore;
+using Deep.Protocol.ContactV2;
 
 namespace Deep.Cli;
 
@@ -32,15 +33,19 @@ internal static class BusinessCommands
                 return new { status = "ok", items = await accounts.ListAttachmentOperationsAsync(ct) };
             if (command is { Area: "group", Operation: "list" })
                 return new { status = "ok", items = await accounts.ListGroupsAsync(ct) };
-            if (command is { Area: "group", Operation: "messages" })
-                return new { status = "ok", items = (await accounts.ListGroupMessagesAsync(Convert.FromHexString(command.Group!), ct)).Select(item =>
+            if (command is { Area: "group", Operation: "messages" or "recent" })
+                return new { status = "ok", items = (command.Operation == "recent"
+                    ? await accounts.ListRecentGroupMessagesAsync(Convert.FromHexString(command.Group!), command.Limit, ct)
+                    : await accounts.ListGroupMessagesAsync(Convert.FromHexString(command.Group!), ct)).Select(item =>
                     new { text = item.Text, local = item.IsLocalAuthor, sequence = item.Sequence }).ToArray() };
 
             DeepIdV2Conversation? conversation = null;
             if (command.Conversation is not null)
                 conversation = (await accounts.GetConversationAsync(command.Conversation, ct)).Conversation;
-            if (command is { Area: "message", Operation: "list" })
-                return new { status = "ok", items = (await accounts.ListMessagesAsync(conversation!, ct)).Select(x => new
+            if (command is { Area: "message", Operation: "list" or "recent" })
+                return new { status = "ok", items = (command.Operation == "recent"
+                    ? await accounts.ListRecentMessagesAsync(conversation!, command.Limit, ct)
+                    : await accounts.ListMessagesAsync(conversation!, ct)).Select(x => new
                 { text = x.Text, local = x.IsLocalAuthor, createdAt = x.CreatedAt }).ToArray() };
             if (command is { Area: "attachment", Operation: "list" })
                 return new { status = "ok", items = await accounts.ListAttachmentsAsync(conversation!, ct) };
@@ -85,6 +90,7 @@ internal static class BusinessCommands
                 ("contact", "stop") => "ContactStop",
                 ("contact", "accept") => "ContactAccept",
                 ("mailbox", "sync") => "MailboxSync",
+                ("mailbox", "receive") => "MailboxReceive",
                 ("message", "queue") => "TextQueue",
                 ("message", "send") => "TextSend",
                 ("attachment", "prepare") => "AttachmentPrepare",
@@ -166,6 +172,12 @@ internal static class BusinessCommands
                 await accounts.CancelOwnInitialContactAsync(Convert.FromHexString(command.OperationId!), network.Source, ct);
                 return new { status = "stopped", remoteRecall = false };
             }
+            if (phase == "MailboxReceive")
+            {
+                var received = await accounts.ReceiveOwnMailboxAsync(network.Source, ct);
+                return new { status = "received", processed = received.ProcessedEnvelopes, hasMore = received.HasMore,
+                    acknowledgementPending = received.AcknowledgementPending };
+            }
             if (phase == "MailboxSync")
             {
                 var synced = await accounts.SynchronizeOwnMailboxAsync(network.Source, ct);
@@ -213,6 +225,25 @@ internal sealed class CliBusinessException(string phase, Exception error) : Exce
                 new[] { "Expired", "RateLimited", "StaleView", "Conflict", "OutcomeUnknown", "SizeFailure", "RecordTooLarge" }.Contains(groupStatus, StringComparer.Ordinal))
                 check = "GroupControl" + groupStatus;
             var exceptionType = current.GetType();
+            if (current is DeepIdV2RouteContextException routeContext)
+                check = routeContext.Check switch
+                {
+                    DeepIdV2RouteContextCheck.NetworkAuthority => "RouteContextNetworkAuthority",
+                    DeepIdV2RouteContextCheck.RecipientNetwork => "RouteContextRecipientNetwork",
+                    DeepIdV2RouteContextCheck.ViewAuthority => "RouteContextViewAuthority",
+                    DeepIdV2RouteContextCheck.HeadAuthority => "RouteContextHeadAuthority",
+                    DeepIdV2RouteContextCheck.DirectoryAuthority => "RouteContextDirectoryAuthority",
+                    DeepIdV2RouteContextCheck.TimeAuthority => "RouteContextTimeAuthority",
+                    DeepIdV2RouteContextCheck.DirectoryWitnessPolicy => "RouteContextDirectoryWitnessPolicy",
+                    DeepIdV2RouteContextCheck.TimeWitnessPolicy => "RouteContextTimeWitnessPolicy",
+                    DeepIdV2RouteContextCheck.DirectoryHead => "RouteContextDirectoryHead",
+                    DeepIdV2RouteContextCheck.ViewHash => "RouteContextViewHash",
+                    DeepIdV2RouteContextCheck.ViewGeneration => "RouteContextViewGeneration",
+                    DeepIdV2RouteContextCheck.ClockBoot => "RouteContextClockBoot",
+                    DeepIdV2RouteContextCheck.ClockRegression => "RouteContextClockRegression",
+                    DeepIdV2RouteContextCheck.ObservationExpiry => "RouteContextObservationExpiry",
+                    _ => "Unclassified"
+                };
             if (exceptionType == typeof(CryptographicException) &&
                 current.Data["Deep.ContactRouteHistoryAnnouncement.Check"] is string historyReason &&
                 new[] { "FutureCreation", "ExpiredAnnouncement", "CreationOutsideSignedRoute" }.Contains(historyReason, StringComparer.Ordinal))

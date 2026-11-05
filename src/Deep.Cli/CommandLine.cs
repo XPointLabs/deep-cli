@@ -20,6 +20,7 @@ internal sealed record CommandLine(string Operation, string Profile, byte[] Netw
     internal string? Device { get; init; }
     internal string? Output { get; init; }
     internal string? Group { get; init; }
+    internal int Limit { get; init; } = 20;
     internal bool DeliveryEvents { get; init; }
     internal IReadOnlyDictionary<string, DeepPermanentIdV2>? KnownContacts { get; init; }
     internal static CommandLine Parse(string[] args)
@@ -30,7 +31,7 @@ internal sealed record CommandLine(string Operation, string Profile, byte[] Netw
             ("account", "create") => new[] { "--name" },
             ("storage", "enroll") => [],
             ("account", "status" or "address") or ("contact", "list" or "operations") or ("message", "pending") or ("attachment", "pending" or "operations") => [],
-            ("session", "run") or ("network", "verify" or "refresh" or "maintain" or "publish") or ("mailbox", "sync") => ["--bootstrap", "--registry"],
+            ("session", "run") or ("network", "verify" or "refresh" or "maintain" or "publish") or ("mailbox", "sync" or "receive") => ["--bootstrap", "--registry"],
             ("contact", "request") => ["--bootstrap", "--registry", "--address", "--operation"],
             ("contact", "stop") => ["--bootstrap", "--registry", "--operation"],
             ("contact", "accept") => ["--bootstrap", "--registry", "--conversation", "--operation"],
@@ -39,6 +40,7 @@ internal sealed record CommandLine(string Operation, string Profile, byte[] Netw
             ("message", "queue") => ["--bootstrap", "--registry", "--conversation", "--text"],
             ("message", "send") => ["--bootstrap", "--registry", "--conversation", "--operation", "--text"],
             ("message", "list") => ["--conversation"],
+            ("message", "recent") => ["--conversation", "--limit"],
             ("attachment", "prepare") => ["--bootstrap", "--registry", "--file", "--media", "--operation"],
             ("attachment", "send") => ["--bootstrap", "--registry", "--conversation", "--asset", "--operation"],
             ("attachment", "queue") => ["--bootstrap", "--registry", "--conversation", "--asset"],
@@ -47,6 +49,7 @@ internal sealed record CommandLine(string Operation, string Profile, byte[] Netw
             ("group", "create") => ["--bootstrap", "--registry", "--name"],
             ("group", "list") => [],
             ("group", "messages") => ["--group"],
+            ("group", "recent") => ["--group", "--limit"],
             ("group", "invite" or "accept" or "advance" or "flush" or "resume" or "sync") => ["--bootstrap", "--registry", "--conversation", "--group"],
             ("group", "publish") => ["--bootstrap", "--registry", "--group"],
             ("group", "send") => ["--bootstrap", "--registry", "--conversation", "--group", "--text"],
@@ -84,6 +87,11 @@ internal sealed record CommandLine(string Operation, string Profile, byte[] Netw
         foreach (var path in new[] { "--file", "--output" })
             if (options.TryGetValue(path, out var value) && (!Path.IsPathFullyQualified(value) || value.Any(char.IsControl)))
                 throw new ArgumentException("Attachment paths must be absolute.");
+        var limit = 20;
+        if (options.TryGetValue("--limit", out var limitText) &&
+            (!Regex.IsMatch(limitText, "\\A[1-9][0-9]{0,2}\\z", RegexOptions.CultureInvariant) ||
+             !int.TryParse(limitText, out limit) || limit > 100))
+            throw new ArgumentException("Recent history limit must be from 1 through 100.");
         return new(args[1], profile, Convert.FromHexString(network), name)
         {
             Area = args[0], Bootstrap = options.GetValueOrDefault("--bootstrap"), Registry = options.GetValueOrDefault("--registry"),
@@ -91,7 +99,7 @@ internal sealed record CommandLine(string Operation, string Profile, byte[] Netw
             OperationId = options.GetValueOrDefault("--operation"), Text = options.GetValueOrDefault("--text"),
             File = options.GetValueOrDefault("--file"), MediaType = options.GetValueOrDefault("--media"), Asset = options.GetValueOrDefault("--asset"),
             Logical = options.GetValueOrDefault("--logical"), Device = options.GetValueOrDefault("--device"), Output = options.GetValueOrDefault("--output"),
-            Group = options.GetValueOrDefault("--group"), DeliveryEvents = deliveryEvents is not null,
+            Group = options.GetValueOrDefault("--group"), Limit = limit, DeliveryEvents = deliveryEvents is not null,
             KnownContacts = ParseKnownContacts(options.GetValueOrDefault("--known-contacts"))
         };
     }

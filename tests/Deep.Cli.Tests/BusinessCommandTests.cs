@@ -1,9 +1,54 @@
 using System.Text.Json;
+using Deep.Protocol.ContactV2;
 
 namespace Deep.Cli.Tests;
 
 public sealed class BusinessCommandTests
 {
+    public static IEnumerable<object[]> RouteContextChecks() =>
+        Enum.GetValues<DeepIdV2RouteContextCheck>().Select(check => new object[] { check, "RouteContext" + check });
+
+    [Theory]
+    [MemberData(nameof(RouteContextChecks))]
+    public void RouteContextDiagnosticsUseOnlyExactSealedProducerCheck(DeepIdV2RouteContextCheck input, string expected)
+    {
+        var error = CreateRouteContextException(input);
+        error.Data["Deep.ContactRoute.Check"] = "DO-NOT-EXPORT";
+        error.Data["payload"] = "DO-NOT-EXPORT";
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(new CliBusinessException("ContactRouteVerification", error).ClosedDiagnostic()));
+        var cause = json.RootElement.GetProperty("causes")[0];
+        Assert.Equal(expected, cause.GetProperty("check").GetString());
+        Assert.Equal("ProtectedState", cause.GetProperty("category").GetString());
+        Assert.DoesNotContain("DO-NOT-EXPORT", json.RootElement.GetRawText());
+    }
+
+    [Fact]
+    public void RouteContextDiagnosticsRejectUnknownEnumAndSpoofedFieldsWithoutInvokingUntrustedGetter()
+    {
+        Exception[] errors = [CreateRouteContextException((DeepIdV2RouteContextCheck)999),
+            new System.Security.Cryptography.CryptographicException("DID2 current route context failed (DirectoryHead)."),
+            new SpoofedRouteContextException()];
+        foreach (var error in errors)
+        {
+            error.Data["Deep.ContactRoute.Check"] = "DirectoryHead";
+            error.Data["Check"] = DeepIdV2RouteContextCheck.DirectoryHead;
+            error.Data["payload"] = "DO-NOT-EXPORT";
+            using var json = JsonDocument.Parse(JsonSerializer.Serialize(new CliBusinessException("ContactRouteVerification", error).ClosedDiagnostic()));
+            Assert.Equal("Unclassified", json.RootElement.GetProperty("causes")[0].GetProperty("check").GetString());
+            Assert.DoesNotContain("DO-NOT-EXPORT", json.RootElement.GetRawText());
+            Assert.DoesNotContain("999", json.RootElement.GetRawText());
+        }
+    }
+
+    private static DeepIdV2RouteContextException CreateRouteContextException(DeepIdV2RouteContextCheck check) =>
+        (DeepIdV2RouteContextException)Activator.CreateInstance(typeof(DeepIdV2RouteContextException),
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic, null, [check], null)!;
+
+    private sealed class SpoofedRouteContextException() : System.Security.Cryptography.CryptographicException("DO-NOT-EXPORT")
+    {
+        public DeepIdV2RouteContextCheck Check => throw new InvalidOperationException("Untrusted getter must not run.");
+    }
+
     [Theory]
     [InlineData("FutureCreation", "HistoryAnnouncementFutureCreation")]
     [InlineData("ExpiredAnnouncement", "HistoryAnnouncementExpiredAnnouncement")]

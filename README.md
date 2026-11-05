@@ -223,9 +223,12 @@ Alongside `--profile` and `--network`, commands accept:
 | `contact stop` | network options, `--operation` |
 | `contact list`, `contact operations` | none; protected local projections only |
 | `mailbox sync` | network options; one actual page/materialization/ACK |
+| `mailbox receive` | network options; one authenticated durable page; exact ACK remains pending for `mailbox sync` |
 | `message queue` | network options, `--conversation`, `--text` |
 | `message send` | network options, `--conversation`, `--operation`, `--text` |
 | `message list` | `--conversation`; explicitly returns message history |
+| `message recent` | `--conversation`, `--limit` (1..100); newest first from authenticated local history |
+| `group recent` | `--group`, `--limit` (1..100); newest first from authenticated local group history |
 | `message pending` | none; returns existing exact pending text commands |
 | `attachment prepare` | network options, absolute `--file`, `--media`, stable asset `--operation` |
 | `attachment queue` | network options, `--conversation`, `--asset` |
@@ -458,3 +461,18 @@ This driver has not yet been executed against the retained accounts.
 Command responses expose `nativeStorageWork` separately from semantic events.
 Costs sum across native operations; working/archive inventory fields are explicit
 maxima across their authenticated observations, never total retained authority.
+
+The explicit receive/read/settle experiment uses `mailbox receive`, an ordinary
+`message recent` or `group recent` read, then `mailbox sync`. Receive returns
+`acknowledgementPending` when a nonempty exact page remains in protected custody.
+Each envelope has already passed the ordinary authenticated native receive and
+semantic materialization before the first command returns. Local history can be
+read after closing/reopening the CLI, independently of ACK network latency. The
+settling sync must finish the retained page's exact ACK before the next page;
+it independently reconstructs native/semantic custody and current authority.
+A repeated receive resumes the same page and remains idempotent. No automatic
+background ACK scheduler is introduced; hosts must explicitly drain pending work.
+The existing full group/messages and direct/list commands remain available for
+comparison and integrity qualification. Recent reads keep their actual protected
+account/catalog/native checks; group recent selects bounded operations before
+opening their native scopes, while direct recent pushes its bound into SQL.

@@ -31,4 +31,11 @@ function New-GsrEngineeringPopulation {
     }}
 }
 
-Export-ModuleMember -Function Select-GsrGroupHead,Select-GsrRetainedConversation,New-GsrEngineeringPopulation
+function New-DirectEngineeringPopulation {
+    param([ValidateRange(1,4)][int]$Rounds=4)
+    foreach($round in 1..$Rounds){foreach($sender in 1..3){foreach($recipient in @(1..3|Where-Object {$_ -ne $sender})){
+        [pscustomobject]@{Round=$round;SenderRole=$sender;RecipientRole=$recipient;Sequence=$round;Submitted=$false;CommandOrdinal=0L;Outcome='NotSubmitted'}
+    }}}
+}
+
+Export-ModuleMember -Function Select-GsrGroupHead,Select-GsrRetainedConversation,New-GsrEngineeringPopulation,New-DirectEngineeringPopulation

@@ -4,6 +4,14 @@ param(
     [Parameter(Mandatory)][string]$RegistryOrigin,
     [Parameter(Mandatory)][string]$RunDirectory,
     [string]$ExecutablePath,
+    [ValidateSet('Group','Direct')][string]$MessageKind='Group',
+    [switch]$ObserveRecovery,
+    [ValidateRange(1,3)][int]$DirectSenderRole=1,
+    [ValidateRange(1,3)][int]$DirectRecipientRole=2,
+    [switch]$SingleDirectSample,
+    [switch]$ReceiveBeforeAck,
+    [switch]$LocalPreflightOnly,
+    [ValidateRange(1,100)][int]$RecentReadLimit=20,
     [ValidateRange(1,4)][int]$Rounds=4,
     [ValidateRange(0,10000)][int]$ExpectedCursor=60,
     [ValidateRange(0,31)][int]$GroupRevision=11,
@@ -20,6 +28,7 @@ $repo=Split-Path $PSScriptRoot -Parent
 $run=[IO.Path]::GetFullPath($RunDirectory)
 $artifactRoot=[IO.Path]::GetFullPath((Join-Path $repo 'artifacts'))+[IO.Path]::DirectorySeparatorChar
 $profiles=@($AliceProfile,$BobProfile,$CarolProfile)
+if($SingleDirectSample -and ($MessageKind -cne 'Direct' -or $DirectSenderRole -eq $DirectRecipientRole)){throw 'Single direct sample requires distinct direct roles.'}
 if(-not $run.StartsWith($artifactRoot,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $run) -or
     @($profiles|Select-Object -Unique).Count -ne 3){throw 'Fresh artifact directory and distinct retained profiles required.'}
 $exe=Join-Path $repo 'src/Deep.Cli/bin/Release/net10.0-windows/deep.exe'
@@ -35,12 +44,14 @@ foreach($path in @($run,$BootstrapDirectory,$exe)){
 }
 Import-Module (Join-Path $PSScriptRoot 'GsrCohort.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'CliSession.psm1') -Force
-$population=@(New-GsrEngineeringPopulation -Rounds $Rounds -Cursor $ExpectedCursor)
+$population=@(if($MessageKind -ceq 'Direct'){New-DirectEngineeringPopulation -Rounds $Rounds}else{New-GsrEngineeringPopulation -Rounds $Rounds -Cursor $ExpectedCursor})
+if($SingleDirectSample){$population=@($population|Where-Object {$_.Round -eq 1 -and $_.SenderRole -eq $DirectSenderRole -and $_.RecipientRole -eq $DirectRecipientRole})}
 $maximumReceiveRequests=[int][Math]::Ceiling($SampleBudgetMilliseconds/$EmptyPollIntervalMilliseconds)+$MaximumReceivePages+1
 # Each receive request emits one command admission; each authored sample adds
 # sender admission plus two outbox/two Store/two visible events. Bound all
 # two ordinary history reads, preflight/round validation and role terminals.
 $eventBudget=[long]$population.Count*(2L*$maximumReceiveRequests+9L)+32L+6L*$Rounds
+if($ReceiveBeforeAck){$eventBudget += [long]$population.Count*(6L*$MaximumReceivePages+4L)}
 if($eventBudget -gt 100000){throw 'Declared engineering population exceeds the diagnostic event budget.'}
 $network=(Get-Content -LiteralPath (Join-Path $BootstrapDirectory 'deep-dev.json') -Raw|ConvertFrom-Json).networkIdHex.ToLowerInvariant()
 if($network -cnotmatch '^[0-9a-f]{32}$'){throw 'Explicit public network binding required.'}
@@ -80,6 +91,7 @@ $controller=New-DeliveryEventController -MaximumEvents ([int]$eventBudget)
 $sessions=@{};$pending=@{};$steps=[Collections.Generic.List[object]]::new();$pairs=@{}
 $script:commandFailed=$false;$script:measurementRejected=$false;$cohortValidated=$false;$closeFailed=$false;$inputsUnchanged=$true;$started=[DateTime]::UtcNow
 $lateDispositions=[Collections.Generic.List[object]]::new()
+$script:recoveryObserved=$false;$script:sampleRecovered=$false
 function Require([bool]$ok,[string]$message,[string]$code='AssertionRejected'){
     if(-not $ok){Record-Failure $code $script:activePhase;throw $message}
 }
@@ -106,6 +118,29 @@ function Require-CorrelatedHistory($result,[ulong]$sequence,[string]$text){
     Require ($result.status -is [string] -and $result.status -ceq 'ok' -and $matched.Count -eq 1 -and
         $matched[0].local -is [bool] -and -not $matched[0].local) 'Ordinary history must return exactly the correlated remote message.'
 }
+function Test-DirectHistory($result,[string]$text){
+    $matched=@($result.items|Where-Object {$_.text -is [string] -and $_.text -ceq $text})
+    Require ($result.status -is [string] -and $result.status -ceq 'ok' -and $matched.Count -le 1) 'Ordinary direct history is malformed or duplicated.'
+    if($matched.Count -eq 0){return $false}
+    Require ($matched[0].local -is [bool] -and -not $matched[0].local) 'Ordinary direct history requires remote author.'
+    return $true
+}
+function Sample-Recipients($sample){
+    if($MessageKind -ceq 'Direct'){return [int[]]@($sample.RecipientRole)}
+    return [int[]]@(1..3|Where-Object {$_ -ne $sample.SenderRole})
+}
+function Recent-Arguments([string]$conversation,[string]$group){
+    if($MessageKind -ceq 'Direct'){return @('message','recent','--conversation',$conversation,'--limit',[string]$RecentReadLimit)}
+    return @('group','recent','--group',$group,'--limit',[string]$RecentReadLimit)
+}
+function Test-RecentHistory($result,[ulong]$sequence,[string]$text){
+    if($MessageKind -ceq 'Direct'){return Test-DirectHistory $result $text}
+    $matched=@($result.items|Where-Object {$_.text -is [string] -and $_.text -ceq $text})
+    Require ($result.status -is [string] -and $result.status -ceq 'ok' -and $matched.Count -le 1) 'Ordinary recent group history is malformed or duplicated.'
+    if($matched.Count -eq 0){return $false}
+    Require-CorrelatedHistory $result $sequence $text
+    return $true
+}
 function Read-ClosedFailure($result){
     # Copy only code-owned closed fields; never serialize the response/exception.
     $codes=@('business-operation-failed','cancelled','invalid-arguments','platform-unavailable','protected-state-rejected','storage-unavailable-or-busy','storage-access-denied','operation-failed','account-missing')
@@ -120,6 +155,7 @@ function Read-ClosedFailure($result){
     $checks+=@('Lifecycle','Network','Membership','Epoch','Issuer','Generation','IssuerWindow','RouteExpiry','Lifetime','Signature'|ForEach-Object {'Grant'+$_})
     $checks+=@('GrantHorizon','GrantOverlap','RequestInterval','GrantStart','ResponseDeadline','IssuedBeforeRequest','IssuedAfterRequest','IssuedAfterCurrentUpper'|ForEach-Object {'RetainedRead'+$_})
     $checks+=@('FutureCreation','ExpiredAnnouncement','CreationOutsideSignedRoute'|ForEach-Object {'HistoryAnnouncement'+$_})
+    $checks+=@('NetworkAuthority','RecipientNetwork','ViewAuthority','HeadAuthority','DirectoryAuthority','TimeAuthority','DirectoryWitnessPolicy','TimeWitnessPolicy','DirectoryHead','ViewHash','ViewGeneration','ClockBoot','ClockRegression','ObservationExpiry'|ForEach-Object {'RouteContext'+$_})
     foreach($artifact in @('XNA1','XNV1','XNH1','ADH1','DeviceCertificate','DCA1','PMT2','XRA1','PMS2','XRC1','XSS1','XIR1V2','XRR1','ThresholdAuthoring','ResolveRequest')){
         foreach($reason in @('InvalidInterval','NotBefore','Expiry')){$checks+='RouteTime'+$artifact+$reason}
     }
@@ -147,15 +183,19 @@ function Read-ClosedFailure($result){
     $closed['diagnostic']=[pscustomobject]@{phase=$phase;causes=$causes}
     [pscustomobject]$closed
 }
-function Start-Command([int]$role,[string]$phase,[string[]]$arguments){
+function Start-Command([int]$role,[string]$phase,[string[]]$arguments,[switch]$DiagnosticRead){
     $script:activePhase=$phase
-    Require (-not $script:commandFailed) 'A stopped measurement cannot submit another command.'
+    $diagnosticAllowed=$DiagnosticRead -and (
+        ($phase -ceq 'history-read' -and $MessageKind -ceq 'Direct' -and $arguments[0] -ceq 'message' -and ($arguments[1] -ceq 'list' -or ($ReceiveBeforeAck -and $arguments[1] -ceq 'recent'))) -or
+        ($ReceiveBeforeAck -and $phase -ceq 'history-read' -and $MessageKind -ceq 'Group' -and $arguments[0] -ceq 'group' -and $arguments[1] -ceq 'recent') -or
+        ($ReceiveBeforeAck -and $phase -ceq 'ack-drain' -and $arguments[0] -ceq 'mailbox' -and $arguments[1] -ceq 'sync'))
+    Require (-not $script:commandFailed -or $diagnosticAllowed) 'A stopped measurement cannot submit another command.'
     Require (-not $pending.ContainsKey($role)) 'One outstanding command per role required.'
     try{$handle=Start-CliSessionCommand $sessions[$role] ($arguments+@('--profile',$profiles[$role-1],'--network',$network))}
     catch{Record-Failure 'CommandSubmissionRejected' $phase;throw}
     # This driver submits only group send as a thirty-minute product command.
     # All its other commands use Program.CommandTimeout (five minutes).
-    $productBudget=if($phase -ceq 'send'){1800000}else{300000}
+    $productBudget=if($phase -ceq 'send' -and $MessageKind -cne 'Direct'){1800000}else{300000}
     $pending[$role]=[pscustomobject]@{Handle=$handle;Phase=$phase;Watch=[Diagnostics.Stopwatch]::StartNew();ProductBudgetMilliseconds=$productBudget}
     return $handle
 }
@@ -189,7 +229,10 @@ function Complete-Command([int]$role,[int]$budget){
         $recovered=$null -ne $recovery -and ($recovery.storeResumes -ne 0 -or $recovery.mailboxResumes -ne 0 -or $recovery.leaseWaits -ne 0)
         if($null -ne $recovery){$row['recoveryWork']=$recovery}
         $steps.Add([pscustomobject]$row)
-        if($recovered){Record-Failure 'RecoveryDetected' $item.Phase;$script:measurementRejected=$true;$script:commandFailed=$true;return $null}
+        if($recovered){
+            $script:recoveryObserved=$true;$script:sampleRecovered=$true
+            if(-not $ObserveRecovery){Record-Failure 'RecoveryDetected' $item.Phase;$script:measurementRejected=$true;$script:commandFailed=$true;return $null}
+        }
         return $result
     }catch{
         $script:commandFailed=$true
@@ -234,20 +277,34 @@ try{
     # Arm every independent stderr reader before any command is submitted.
     $script:activePhase='session-open'
     foreach($role in 1..3){$sessions[$role]=New-CliSession $exe $profiles[$role-1] $network $BootstrapDirectory $RegistryOrigin -DeliveryController $controller -ControllerRole $role}
-    $contacts=@{};$group=$null
+    $contacts=@{};$directPending=@{};$group=$null
     foreach($role in 1..3){
         Require ([bool](Call $role 'retained-account' @('account','status')).accountPresent) 'Existing retained account required.' 'CohortRejected'
         $contacts[$role]=(Call $role 'retained-consent' @('contact','list')).contacts
+        if($MessageKind -ceq 'Direct'){
+            $pendingResult=Call $role 'retained-pending' @('message','pending')
+            $directPending[$role]=@($pendingResult.items)
+            continue
+        }
         $head=Select-GsrGroupHead (Call $role 'retained-head' @('group','list')).items ('GSR CLI QA '+$GroupRevision)
         if($null -eq $group){$group=$head.Group}else{Require ($head.Group -ceq $group) 'Profiles disagree on exact group.' 'CohortRejected'}
     }
-    Check-Histories 0
+    if($MessageKind -ceq 'Group'){Check-Histories 0}
     foreach($left in 1..2){foreach($right in ($left+1)..3){
+        if($SingleDirectSample -and (Pair-Key $left $right) -cne (Pair-Key $DirectSenderRole $DirectRecipientRole)){continue}
         $script:activePhase='retained-consent'
         $conversation=Select-GsrRetainedConversation $contacts[$left] $contacts[$right]
         Require ($null -ne $conversation) 'Existing mutual consent required; no contact setup or repair.' 'CohortRejected'
         $pairs[(Pair-Key $left $right)]=$conversation
         foreach($role in @($left,$right)){
+            if($MessageKind -ceq 'Direct'){
+                if(-not $SingleDirectSample -or $role -eq $DirectSenderRole){
+                    Require (@($directPending[$role]|Where-Object {$_.conversation -ceq $conversation}).Count -eq 0) 'Selected sender conversation has original pending work; recover it before new authoring.' 'CohortRejected'
+                }
+                [void](Call $role 'retained-direct-history' @('message','list','--conversation',$conversation))
+                continue
+            }
+            if($LocalPreflightOnly){continue}
             # Original XUR health is historical information. The strict Shared
             # verifier reads actual current L and retains all live owner guards.
             [void](Call $role 'retained-route-intervals' (@('contact','route-health','--conversation',$conversation)+$networkArgs))
@@ -259,16 +316,36 @@ try{
     foreach($sample in $population){
         if($script:commandFailed){break}
         Require-Inputs
-        $sender=$sample.SenderRole;$recipients=@(1..3|Where-Object {$_ -ne $sender});$peer=$recipients[0]
-        $text='CLI engineering sequence '+$sample.Sequence+' role '+$sender
+        $sender=$sample.SenderRole;$recipients=@(Sample-Recipients $sample);$peer=$recipients[0]
+        $conversation=$pairs[(Pair-Key $sender $peer)]
+        $script:sampleRecovered=$false
+        $text=if($MessageKind -ceq 'Direct'){'Direct text '+[Guid]::NewGuid().ToString('N')}else{'CLI engineering sequence '+$sample.Sequence+' role '+$sender}
         $sample.Submitted=$true;$sample.Outcome='SubmissionUncertain'
         $watch=[Diagnostics.Stopwatch]::StartNew()
-        $handle=Start-Command $sender 'send' (@('group','send','--group',$group,'--conversation',$pairs[(Pair-Key $sender $peer)],'--text',$text)+$networkArgs)
-        $sample.Submitted=$true;$sample.CommandOrdinal=$handle.CommandOrdinal;$sample.Outcome='Incomplete'
+        if($MessageKind -ceq 'Direct'){
+            $handle=Start-Command $sender 'queue' (@('message','queue','--conversation',$conversation,'--text',$text)+$networkArgs)
+        }else{$handle=Start-Command $sender 'send' (@('group','send','--group',$group,'--conversation',$conversation,'--text',$text)+$networkArgs)}
+        $sample.CommandOrdinal=$handle.CommandOrdinal;$sample.Outcome='Incomplete'
         [pscustomobject]@{round=$sample.Round;senderRole=$sender;sequence=$sample.Sequence;commandOrdinal=$sample.CommandOrdinal}|
             ConvertTo-Json -Compress|Add-Content -LiteralPath (Join-Path $run 'submissions.jsonl') -Encoding utf8
+        if($MessageKind -ceq 'Direct'){
+            $queued=Complete-Command $sender 330000
+            Require ($null -ne $queued -and -not $script:commandFailed -and $queued.status -ceq 'queued' -and $queued.operation -is [string] -and
+                $queued.operation -cmatch '^[0-9a-f]{64}$') 'Original direct queue failed; preserve protected original custody.'
+            $dispatch=Start-Command $sender 'send' (@('message','send','--conversation',$conversation,'--operation',$queued.operation,'--text',$text)+$networkArgs)
+            $sample|Add-Member -NotePropertyName DispatchCommandOrdinal -NotePropertyValue $dispatch.CommandOrdinal -Force
+            $controller.BindDirectDispatch($sender,$sample.CommandOrdinal,$dispatch.CommandOrdinal)
+            [pscustomobject]@{senderRole=$sender;admissionCommandOrdinal=$sample.CommandOrdinal;dispatchCommandOrdinal=$dispatch.CommandOrdinal}|
+                ConvertTo-Json -Compress|Add-Content -LiteralPath (Join-Path $run 'dispatches.jsonl') -Encoding utf8
+        }
         $pages=@{};$more=@{};$requests=@{};$nextEmptyPoll=@{};$historyRead=@{}
-        foreach($role in $recipients){$historyRead[$role]=$false;$pages[$role]=0;$requests[$role]=1;$nextEmptyPoll[$role]=0L;$more[$role]=$false;[void](Start-Command $role 'receive-ack' (@('mailbox','sync')+$networkArgs))}
+        $awaitingAck=@{};$readBeforeAck=@{};$receivedPending=@{};$historyValidated=@{}
+        foreach($role in $recipients){
+            $historyRead[$role]=$false;$pages[$role]=0;$requests[$role]=1;$nextEmptyPoll[$role]=0L;$more[$role]=$false
+            $awaitingAck[$role]=$false;$readBeforeAck[$role]=$false;$receivedPending[$role]=0;$historyValidated[$role]=$false
+            if($ReceiveBeforeAck){[void](Start-Command $role 'receive' (@('mailbox','receive')+$networkArgs))}
+            else{[void](Start-Command $role 'receive-ack' (@('mailbox','sync')+$networkArgs))}
+        }
         # Explicit bounded engineering scheduling of the existing API, not a
         # product background scheduler, business retry or history-based clock.
         while($watch.ElapsedMilliseconds -lt $SampleBudgetMilliseconds){
@@ -280,9 +357,36 @@ try{
                     $phase=$pending[$role].Phase;$ordinal=$pending[$role].Handle.CommandOrdinal
                     $result=Complete-Command $role ([Math]::Max(1,$SampleBudgetMilliseconds-[int]$watch.ElapsedMilliseconds))
                     if($phase -ceq 'history-read' -and $null -ne $result){
-                        Require-CorrelatedHistory $result $sample.Sequence $text
+                        if($ReceiveBeforeAck){
+                            $present=Test-RecentHistory $result $sample.Sequence $text
+                            $readBeforeAck[$role]=$true
+                            if($MessageKind -ceq 'Direct'){$sample|Add-Member -NotePropertyName DirectHistoryOriginalPresent -NotePropertyValue $present -Force}
+                            if($present -and -not $historyRead[$role]){
+                                $controller.RecordHistoryRead($sender,$sample.CommandOrdinal,$role,$ordinal)
+                                $historyRead[$role]=$true
+                            }
+                            continue
+                        }
+                        if($MessageKind -ceq 'Direct'){Require (Test-DirectHistory $result $text) 'Exact original direct text missing from ordinary history.'}
+                        else{Require-CorrelatedHistory $result $sample.Sequence $text}
                         $controller.RecordHistoryRead($sender,$sample.CommandOrdinal,$role,$ordinal)
                         $historyRead[$role]=$true
+                        if($MessageKind -ceq 'Direct'){$sample|Add-Member -NotePropertyName DirectHistoryOriginalPresent -NotePropertyValue $true -Force}
+                    }elseif($phase -ceq 'history-validation' -and $null -ne $result){
+                        Require (Test-RecentHistory $result $sample.Sequence $text) 'Exact ordinary text changed or duplicated after ACK.'
+                        $historyValidated[$role]=$true
+                    }elseif($phase -ceq 'ack-drain' -and $null -ne $result){
+                        Require ($result.status -ceq 'ok' -and $result.processed -eq $receivedPending[$role] -and
+                            $result.processed -eq $result.tombstones) 'Ordinary sync must ACK exactly the retained receive page.'
+                        $awaitingAck[$role]=$false;$more[$role]=[bool]$result.hasMore
+                    }elseif($phase -ceq 'receive' -and $null -ne $result){
+                        Require ($result.status -ceq 'received' -and $result.processed -ge 0 -and
+                            $result.acknowledgementPending -is [bool] -and $result.acknowledgementPending -eq ($result.processed -gt 0)) 'Ordinary receive must retain its exact deferred ACK page.'
+                        Require (-not $result.hasMore -or $result.processed -gt 0) 'Non-final receive page made no durable progress.'
+                        $more[$role]=[bool]$result.hasMore;$receivedPending[$role]=$result.processed
+                        $awaitingAck[$role]=[bool]$result.acknowledgementPending;$readBeforeAck[$role]=$false
+                        if($result.processed -eq 0){$nextEmptyPoll[$role]=$watch.ElapsedMilliseconds+$EmptyPollIntervalMilliseconds}
+                        else{$pages[$role]++;$nextEmptyPoll[$role]=$watch.ElapsedMilliseconds}
                     }elseif($role -ne $sender -and $null -ne $result){
                         Require ($result.processed -ge 0 -and $result.processed -eq $result.tombstones) 'Receive/ACK result incomplete.'
                         Require (-not $result.hasMore -or $result.processed -gt 0) 'Non-final mailbox page made no durable progress.'
@@ -290,16 +394,29 @@ try{
                         if($result.processed -eq 0){$nextEmptyPoll[$role]=$watch.ElapsedMilliseconds+$EmptyPollIntervalMilliseconds}
                         else{$pages[$role]++;$nextEmptyPoll[$role]=$watch.ElapsedMilliseconds}
                     }elseif($role -eq $sender -and $null -ne $result){
-                        Require ($result.completed -eq 2) 'Fresh send must contain exactly two current target items.'
+                        if($MessageKind -ceq 'Direct'){Require ($result.status -ceq 'stored' -and $result.ingressDispatched -ceq $true) 'Original direct send must confirm Store.'}
+                        elseif($result.completed -ne 2){Record-Failure 'PartialSend' 'send';$script:commandFailed=$true}
                     }
                 }
             }
             if($script:commandFailed){$sample.Outcome='CommandOrRecoveryFailure';break}
             foreach($role in $recipients){
-                if(-not $pending.ContainsKey($role) -and -not $historyRead[$role] -and $controller.HasRecipientObservation($sender,$sample.CommandOrdinal,$role)){
+                if($ReceiveBeforeAck -and -not $pending.ContainsKey($role)){
+                    if($awaitingAck[$role]){
+                        if($readBeforeAck[$role]){[void](Start-Command $role 'ack-drain' (@('mailbox','sync')+$networkArgs))}
+                        else{[void](Start-Command $role 'history-read' (Recent-Arguments $conversation $group))}
+                        continue
+                    }
+                    if($historyRead[$role] -and -not $historyValidated[$role]){
+                        [void](Start-Command $role 'history-validation' (Recent-Arguments $conversation $group))
+                        continue
+                    }
+                }
+                if(-not $ReceiveBeforeAck -and -not $pending.ContainsKey($role) -and -not $historyRead[$role] -and $controller.HasRecipientObservation($sender,$sample.CommandOrdinal,$role)){
                     # Ordinary same-session read: Sync has returned, including ACK.
                     # Correlate the actual result in RAM; never use ACK as its clock.
-                    [void](Start-Command $role 'history-read' @('group','messages','--group',$group))
+                    if($MessageKind -ceq 'Direct'){[void](Start-Command $role 'history-read' @('message','list','--conversation',$conversation))}
+                    else{[void](Start-Command $role 'history-read' @('group','messages','--group',$group))}
                     continue
                 }
                 if(-not $pending.ContainsKey($role) -and $watch.ElapsedMilliseconds -ge $nextEmptyPoll[$role] -and
@@ -307,18 +424,59 @@ try{
                     if($pages[$role] -ge $MaximumReceivePages -or $requests[$role] -ge $maximumReceiveRequests){
                         $sample.Outcome='ReceiveBound';Record-Failure 'ReceiveBound' 'receive-ack';$script:commandFailed=$true;break
                     }
-                    $requests[$role]++;[void](Start-Command $role 'receive-ack' (@('mailbox','sync')+$networkArgs))
+                    $requests[$role]++
+                    if($ReceiveBeforeAck){[void](Start-Command $role 'receive' (@('mailbox','receive')+$networkArgs))}
+                    else{[void](Start-Command $role 'receive-ack' (@('mailbox','sync')+$networkArgs))}
                 }
             }
             if($script:commandFailed){break}
-            if(-not $pending.Count -and @($recipients|Where-Object {-not $historyRead[$_]}).Count -eq 0){$sample.Outcome='Success';break}
+            if(-not $pending.Count -and @($recipients|Where-Object {-not $historyRead[$_] -or ($ReceiveBeforeAck -and -not $historyValidated[$_])}).Count -eq 0){$sample.Outcome='Success';break}
             Start-Sleep -Milliseconds 25
         }
+        $sample|Add-Member -NotePropertyName RecoveryObserved -NotePropertyValue $script:sampleRecovered -Force
         if($sample.Outcome -ne 'Success'){
+            if(($MessageKind -ceq 'Direct' -or $ReceiveBeforeAck) -and -not $controller.Rejected){
+                # Finish only already admitted work, then inspect ordinary local
+                # history once even if Store/ACK failed. Never retry the send.
+                Collect-AdmittedCommands
+                foreach($role in $recipients){
+                    if($historyRead[$role] -and -not $ReceiveBeforeAck){continue}
+                    if(-not $historyRead[$role]){
+                        $readArguments=if($ReceiveBeforeAck){Recent-Arguments $conversation $group}else{@('message','list','--conversation',$conversation)}
+                        $readHandle=Start-Command $role 'history-read' $readArguments -DiagnosticRead
+                        $readResult=Complete-Command $role 330000
+                        if($null -ne $readResult){
+                            $present=if($ReceiveBeforeAck){Test-RecentHistory $readResult $sample.Sequence $text}else{Test-DirectHistory $readResult $text}
+                            if($MessageKind -ceq 'Direct'){$sample|Add-Member -NotePropertyName DirectHistoryOriginalPresent -NotePropertyValue $present -Force}
+                        }
+                        if($null -ne $readResult -and $present){
+                            $controller.RecordHistoryRead($sender,$sample.CommandOrdinal,$role,$readHandle.CommandOrdinal)
+                            $historyRead[$role]=$true
+                        }
+                    }
+                    if($ReceiveBeforeAck){
+                        $lastReceive=@($steps|Where-Object {$_.role -eq $role -and $_.phase -ceq 'receive' -and $_.exit -eq 0}|Select-Object -Last 1)
+                        if($lastReceive.Count -eq 1 -and $lastReceive[0].processed -gt 0){
+                            $laterAck=@($steps|Where-Object {$_.role -eq $role -and $_.phase -ceq 'ack-drain' -and $_.commandOrdinal -gt $lastReceive[0].commandOrdinal})
+                            if($laterAck.Count -eq 0){
+                                [void](Start-Command $role 'ack-drain' (@('mailbox','sync')+$networkArgs) -DiagnosticRead)
+                                $drained=Complete-Command $role 330000
+                                if($null -ne $drained){Require ($drained.processed -eq $lastReceive[0].processed -and $drained.tombstones -eq $drained.processed) 'Diagnostic ordinary sync must ACK exactly the admitted receive page.'}
+                            }
+                        }
+                        if($historyRead[$role]){
+                            [void](Start-Command $role 'history-read' (Recent-Arguments $conversation $group) -DiagnosticRead)
+                            $validation=Complete-Command $role 330000
+                            if($null -ne $validation){Require (Test-RecentHistory $validation $sample.Sequence $text) 'Ordinary original text changed or duplicated after diagnostic ACK.'}
+                        }
+                    }
+                }
+            }
+            $sample.RecoveryObserved=$script:sampleRecovered
             if(-not $script:commandFailed){$sample.Outcome='Deadline';Record-Failure 'CommandTimeout' 'sample-window'}
             $script:commandFailed=$true;break
         }
-        if($sender -eq 3){Check-Histories $sample.Round}
+        if($MessageKind -ceq 'Group' -and $sender -eq 3){Check-Histories $sample.Round}
     }
 }catch{
     $code=if($script:activePhase -ceq 'input-binding'){'InputChanged'}elseif($script:activePhase -in @('retained-account','retained-consent','retained-head','cohort-head')){'CohortRejected'}else{'DriverAssertionRejected'}
@@ -332,36 +490,41 @@ finally{
     try{Require-Inputs}catch{$inputsUnchanged=$false}
     $samples=[Collections.Generic.List[object]]::new();$roleStats=[Collections.Generic.List[object]]::new();$pairStats=[Collections.Generic.List[object]]::new()
     foreach($sample in $population){
-        $recipients=[int[]]@(1..3|Where-Object {$_ -ne $sample.SenderRole})
+        $recipients=[int[]]@(Sample-Recipients $sample)
         $metric=$controller.Sample($sample.SenderRole,$sample.CommandOrdinal,$recipients)
         $observed=$metric.Complete -and -not $closeFailed -and $inputsUnchanged
-        $finite=$sample.Outcome -ceq 'Success' -and -not $script:measurementRejected -and $metric.Complete -and -not $closeFailed -and $inputsUnchanged
-        if(-not $finite -and $sample.Outcome -ceq 'Success'){Record-Failure 'MissingMeasurementObservation' 'measurement-finalization'}
+        $recovered=$sample.PSObject.Properties.Name -contains 'RecoveryObserved' -and $sample.RecoveryObserved
+        $finite=$sample.Outcome -ceq 'Success' -and -not $recovered -and -not $script:measurementRejected -and $metric.Complete -and -not $closeFailed -and $inputsUnchanged
+        if(-not $finite -and $sample.Outcome -ceq 'Success'){Record-Failure $(if($recovered){'RecoveryDetected'}else{'MissingMeasurementObservation'}) 'measurement-finalization'}
         $recipientSamples=@(foreach($recipient in $recipients){
             $readMilliseconds=$controller.HistoryReadMilliseconds($sample.SenderRole,$sample.CommandOrdinal,$recipients,$recipient)
+            $observedRead=$controller.ObservedHistoryReadMilliseconds($sample.SenderRole,$sample.CommandOrdinal,$recipient)
+            $observedReadFinite=[double]::IsFinite($observedRead) -and -not $closeFailed -and $inputsUnchanged
             $readFinite=$finite -and [double]::IsFinite($readMilliseconds)
-            [pscustomobject]@{recipientRole=$recipient;milliseconds=$(if($finite){$controller.RecipientMilliseconds($sample.SenderRole,$sample.CommandOrdinal,$recipients,$recipient)}else{$null});positiveInfinity=(-not $finite);historyReadResultMilliseconds=$(if($readFinite){$readMilliseconds}else{$null});historyReadPositiveInfinity=(-not $readFinite)}
+            [pscustomobject]@{recipientRole=$recipient;milliseconds=$(if($finite){$controller.RecipientMilliseconds($sample.SenderRole,$sample.CommandOrdinal,$recipients,$recipient)}else{$null});positiveInfinity=(-not $finite);historyReadResultMilliseconds=$(if($readFinite){$readMilliseconds}else{$null});historyReadPositiveInfinity=(-not $readFinite);observedHistoryReadResultMilliseconds=$(if($observedReadFinite){$observedRead}else{$null});ordinaryHistoryReadObserved=$observedReadFinite}
         })
         $readFinite=$finite -and @($recipientSamples|Where-Object historyReadPositiveInfinity).Count -eq 0
         if($finite -and -not $readFinite){Record-Failure 'MissingMeasurementObservation' 'history-read-finalization'}
         $firstRead=$(if($readFinite){($recipientSamples.historyReadResultMilliseconds|Measure-Object -Minimum).Minimum}else{$null})
         $allReads=$(if($readFinite){($recipientSamples.historyReadResultMilliseconds|Measure-Object -Maximum).Maximum}else{$null})
         $observedBlock=[pscustomobject]@{durableVisibleObserved=$observed;firstRecipientMilliseconds=$(if($observed){$metric.FirstRecipientMilliseconds}else{$null});allRecipientsMilliseconds=$(if($observed){$metric.AllRecipientsMilliseconds}else{$null})}
-        $samples.Add([pscustomobject]@{round=$sample.Round;senderRole=$sample.SenderRole;sequence=$sample.Sequence;commandOrdinal=$sample.CommandOrdinal;submitted=$sample.Submitted;outcome=$sample.Outcome;positiveInfinity=(-not $finite);observed=$observedBlock;firstRecipientMilliseconds=$(if($finite){$metric.FirstRecipientMilliseconds}else{$null});allRecipientsMilliseconds=$(if($finite){$metric.AllRecipientsMilliseconds}else{$null});historyReadPositiveInfinity=(-not $readFinite);firstHistoryReadResultMilliseconds=$firstRead;allHistoryReadResultMilliseconds=$allReads;nativeOutboxMilliseconds=$(if($finite){$metric.NativeOutboxMilliseconds}else{$null});allStoresMilliseconds=$(if($finite){$metric.AllStoresMilliseconds}else{$null});recipients=$recipientSamples})
+        $samples.Add([pscustomobject]@{round=$sample.Round;senderRole=$sample.SenderRole;sequence=$sample.Sequence;commandOrdinal=$sample.CommandOrdinal;dispatchCommandOrdinal=$(if($sample.PSObject.Properties.Name -contains 'DispatchCommandOrdinal'){$sample.DispatchCommandOrdinal}else{$sample.CommandOrdinal});submitted=$sample.Submitted;outcome=$sample.Outcome;ordinaryDirectHistoryOriginalPresent=$(if($sample.PSObject.Properties.Name -contains 'DirectHistoryOriginalPresent'){$sample.DirectHistoryOriginalPresent}else{$null});recoveryObserved=$recovered;positiveInfinity=(-not $finite);observed=$observedBlock;firstRecipientMilliseconds=$(if($finite){$metric.FirstRecipientMilliseconds}else{$null});allRecipientsMilliseconds=$(if($finite){$metric.AllRecipientsMilliseconds}else{$null});historyReadPositiveInfinity=(-not $readFinite);firstHistoryReadResultMilliseconds=$firstRead;allHistoryReadResultMilliseconds=$allReads;nativeOutboxMilliseconds=$(if($finite){$metric.NativeOutboxMilliseconds}else{$null});allStoresMilliseconds=$(if($finite){$metric.AllStoresMilliseconds}else{$null});recipients=$recipientSamples})
     }
     foreach($role in 1..3){
+        if(@($samples|Where-Object {$_.senderRole -eq $role}).Count -eq 0){continue}
         $values=[double[]]@($samples|Where-Object {$_.senderRole -eq $role}|ForEach-Object {if($_.positiveInfinity){[double]::PositiveInfinity}else{[double]$_.allRecipientsMilliseconds}})
         $p95=[Deep.Cli.Measurement.DeliveryEventController]::NearestRank($values,.95)
         $readValues=[double[]]@($samples|Where-Object {$_.senderRole -eq $role}|ForEach-Object {if($_.historyReadPositiveInfinity){[double]::PositiveInfinity}else{[double]$_.allHistoryReadResultMilliseconds}})
         $readP95=[Deep.Cli.Measurement.DeliveryEventController]::NearestRank($readValues,.95)
         $roleStats.Add([pscustomobject]@{senderRole=$role;population=$values.Count;p95Milliseconds=$(if([double]::IsFinite($p95)){$p95}else{$null});positiveInfinity=[double]::IsPositiveInfinity($p95);historyReadP95Milliseconds=$(if([double]::IsFinite($readP95)){$readP95}else{$null});historyReadPositiveInfinity=[double]::IsPositiveInfinity($readP95)})
         foreach($recipient in @(1..3|Where-Object {$_ -ne $role})){
-            $values=[double[]]@($samples|Where-Object {$_.senderRole -eq $role}|ForEach-Object {
+            if(@($samples|Where-Object {$_.senderRole -eq $role -and @($_.recipients|Where-Object {$_.recipientRole -eq $recipient}).Count -eq 1}).Count -eq 0){continue}
+            $values=[double[]]@($samples|Where-Object {$_.senderRole -eq $role -and @($_.recipients|Where-Object {$_.recipientRole -eq $recipient}).Count -eq 1}|ForEach-Object {
                 $pair=@($_.recipients|Where-Object {$_.recipientRole -eq $recipient})[0]
                 if($pair.positiveInfinity){[double]::PositiveInfinity}else{[double]$pair.milliseconds}
             })
             $p95=[Deep.Cli.Measurement.DeliveryEventController]::NearestRank($values,.95)
-            $readValues=[double[]]@($samples|Where-Object {$_.senderRole -eq $role}|ForEach-Object {
+            $readValues=[double[]]@($samples|Where-Object {$_.senderRole -eq $role -and @($_.recipients|Where-Object {$_.recipientRole -eq $recipient}).Count -eq 1}|ForEach-Object {
                 $pair=@($_.recipients|Where-Object {$_.recipientRole -eq $recipient})[0]
                 if($pair.historyReadPositiveInfinity){[double]::PositiveInfinity}else{[double]$pair.historyReadResultMilliseconds}
             })
@@ -370,7 +533,7 @@ finally{
         }
     }
     $passed=$cohortValidated -and -not $script:commandFailed -and -not $closeFailed -and $inputsUnchanged -and -not $controller.Rejected -and @($samples|Where-Object {$_.positiveInfinity -or $_.historyReadPositiveInfinity}).Count -eq 0
-    [ordered]@{schema='deep.cli.delivery-engineering.v1';passed=$passed;failurePhase=$script:failurePhase;failureCode=$script:failureCode;startedUtc=$started;finishedUtc=[DateTime]::UtcNow;plannedSamples=$population.Count;rounds=$Rounds;startingCursor=$ExpectedCursor;expectedFinalCursor=$ExpectedCursor+$Rounds;groupRevision=$GroupRevision;cohortValidated=$cohortValidated;measurementRejected=$script:measurementRejected;alreadyAdmittedDispositions=$lateDispositions.ToArray();sampleBudgetMilliseconds=$SampleBudgetMilliseconds;emptyPollIntervalMilliseconds=$EmptyPollIntervalMilliseconds;maximumNonemptyReceivePages=$MaximumReceivePages;maximumReceiveRequestsPerSample=$maximumReceiveRequests;diagnosticEventBudget=$eventBudget;streams=$controller.StreamSummary();inputHashes=$inputHashes;runtimeSha256=$runtimeHash;inputsUnchanged=$inputsUnchanged;sessionCloseFailed=$closeFailed;controllerRejected=$controller.Rejected;samples=$samples.ToArray();perRole=$roleStats.ToArray();perDirectedPair=$pairStats.ToArray();steps=$steps.ToArray();tombstoneAckTimingObserved=$false;applicationReceiptTimingObserved=$false;productBackgroundQualified=$false;warmLatencyQualified=$false;releaseQualified=$false}|ConvertTo-Json -Depth 14|Set-Content -LiteralPath (Join-Path $run 'receipt.json') -Encoding utf8
+    [ordered]@{schema='deep.cli.delivery-engineering.v1';passed=$passed;failurePhase=$script:failurePhase;failureCode=$script:failureCode;startedUtc=$started;finishedUtc=[DateTime]::UtcNow;plannedSamples=$population.Count;messageKind=$MessageKind;receiveBeforeAck=[bool]$ReceiveBeforeAck;localPreflightOnly=[bool]$LocalPreflightOnly;currentRoutesPreflightVerified=($MessageKind -ceq 'Group' -and -not $LocalPreflightOnly);recentReadLimit=$RecentReadLimit;observeRecovery=[bool]$ObserveRecovery;recoveryObserved=$script:recoveryObserved;singleDirectSample=[bool]$SingleDirectSample;rounds=$Rounds;startingCursor=$ExpectedCursor;expectedFinalCursor=$ExpectedCursor+$Rounds;groupRevision=$GroupRevision;cohortValidated=$cohortValidated;measurementRejected=$script:measurementRejected;alreadyAdmittedDispositions=$lateDispositions.ToArray();sampleBudgetMilliseconds=$SampleBudgetMilliseconds;emptyPollIntervalMilliseconds=$EmptyPollIntervalMilliseconds;maximumNonemptyReceivePages=$MaximumReceivePages;maximumReceiveRequestsPerSample=$maximumReceiveRequests;diagnosticEventBudget=$eventBudget;streams=$controller.StreamSummary();inputHashes=$inputHashes;runtimeSha256=$runtimeHash;inputsUnchanged=$inputsUnchanged;sessionCloseFailed=$closeFailed;controllerRejected=$controller.Rejected;samples=$samples.ToArray();perRole=$roleStats.ToArray();perDirectedPair=$pairStats.ToArray();steps=$steps.ToArray();tombstoneAckTimingObserved=$false;applicationReceiptTimingObserved=$false;productBackgroundQualified=$false;warmLatencyQualified=$false;releaseQualified=$false}|ConvertTo-Json -Depth 14|Set-Content -LiteralPath (Join-Path $run 'receipt.json') -Encoding utf8
     Write-Host ([pscustomobject]@{passed=$passed;plannedSamples=$population.Count;submittedSamples=@($population|Where-Object Submitted).Count;finiteSamples=@($samples|Where-Object {-not $_.positiveInfinity}).Count}|ConvertTo-Json -Compress)
 }
 if(-not $passed){throw 'Engineering run failed; retain original submitted work and receipt. No automatic restart or reauthoring.'}

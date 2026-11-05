@@ -1,5 +1,73 @@
 # Concurrent engineering driver
 
+The same driver now accepts `-MessageKind Direct`. It predeclares six directed
+originals per round on the retained three accounts, or exactly one original with
+`-SingleDirectSample -DirectSenderRole 1 -DirectRecipientRole 2`. Direct preflight
+uses only ordinary local account, contact, pending and history reads. It does not
+verify or maintain routes before the original admission. Pending originals block
+new authoring only in each selected sender/conversation. Unrelated conversations
+are not a new-authoring gate. The selected pair must retain mutual consent.
+
+Direct submission first uses the genuine authoring command `message queue` and
+then `message send` with its exact returned operation and original text. The
+controller binds the queue admission ordinal to the distinct send ordinal:
+queue admission is t0, while durable outbox and Store events belong to send.
+Shared retains the protected original operation and exact text;
+no operation, conversation or payload is copied into engineering artifacts. It
+does not invent a resume operation or replace a failed original. The
+recipient uses ordinary `mailbox sync` followed by `message list`, with exact
+remote text correlation in RAM. A failed original send/receive stops future
+authoring, collects already admitted operations under their original budget, and
+allows one diagnostic ordinary local history read. Its original presence or
+absence is inspected without treating an ACK or sender Store as the read result.
+
+`-ObserveRecovery` permits continued ordinary observation after recovery counters
+are nonzero. Those counters and raw
+`observedHistoryReadResultMilliseconds` remain separate from the first-attempt
+sample, which stays positive infinity for a recovery-assisted or failed command.
+Raw ordinary-read timing also requires exact outbox/recipient event correlation,
+successful ordinary history response, unchanged inputs and clean drop-free EOF.
+It does not require sender success or Store, and cannot grant performance
+qualification. The default Group mode continues to stop on recovery.
+
+Example single-pair pilot, using an existing archived runtime and a fresh
+repo-owned run directory (execute with PowerShell7.6.5):
+
+```powershell
+& ./eng/Invoke-ThreeClientDeliveryEngineering.ps1 -MessageKind Direct `
+  -SingleDirectSample -DirectSenderRole 1 -DirectRecipientRole 2 -Rounds 1 `
+  -ObserveRecovery -BootstrapDirectory $bootstrap -RegistryOrigin $registry `
+  -ExecutablePath $archivedExecutable -RunDirectory $freshRunDirectory
+```
+
+With a runtime supporting the genuine deferred receive surface,
+`-ReceiveBeforeAck -RecentReadLimit 20` changes both Direct and Group observation
+to `mailbox receive` → ordinary bounded `message recent`/`group recent` → ordinary
+`mailbox sync` → the same ordinary recent read again. It validates the exact
+retained page's processed/tombstone counts during sync and the original remote
+text (plus group sequence) exactly once afterward. Only the first successful
+correlated recent response supplies the read timestamp. Later ACK failure or
+recovery cannot erase that diagnostic read, and cannot qualify the full sample.
+Prior pages without the planned original drain under the same bounds without
+producing a read sample. Intentional deferred ACK continuation does not imply
+recovery; actual recovery counters retain the existing infinity rule.
+
+For a diagnostic group admission, `-LocalPreflightOnly` skips the separate
+current-route preflight. Exact retained accounts, consent, group head, epoch,
+cursor and native history remain required. Shared independently checks route
+authority inside the original send. Receipts distinguish this local preflight
+from verified current routes, and every release/warm qualification flag stays
+false. This option does not permit authoring past a retained partial group
+command or retrying a new direct operation in place of the original pending one.
+
+The focused source filter for measurement and the new command surface is
+`FullyQualifiedName~Deep.Cli.Tests.DeliveryMeasurementTests|FullyQualifiedName~Deep.Cli.Tests.RecentReceiveCommandTests`.
+
+`Test-GsrEngineeringScenario.ps1` additionally compiles the small standalone
+controller and exercises failed sender/ACK plus successful ordinary-read evidence
+without opening profiles or making network calls. The new compiled xUnit cases
+remain subject to the normal focused source gate.
+
 `eng/Invoke-ThreeClientDeliveryEngineering.ps1` (PowerShell7.6.5) prepares the next bounded source
 scenario. The runtime09 attempt at
 `artifacts/retained-goal-20261105-09/engineering01/receipt.json` passed cohort

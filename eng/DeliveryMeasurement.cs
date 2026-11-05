@@ -21,6 +21,7 @@ public sealed class DeliveryEventController
     private readonly Dictionary<int, StreamState> streams = new();
     private readonly List<Row> rows = new();
     private readonly Dictionary<(int Sender, long Command, int Recipient), long> historyReads = new();
+    private readonly Dictionary<(int Sender, long Admission), long> dispatches = new();
     private bool rejected;
     public bool Rejected { get { lock (gate) return rejected; } }
     public int MaximumEvents => maximumEvents;
@@ -67,6 +68,24 @@ public sealed class DeliveryEventController
         }
     }
 
+    // Ordinary direct CLI authoring has two public commands. Queue admission is
+    // t0; the exact returned operation is dispatched by the later send command.
+    // Only ordinals enter this controller, never the operation or message text.
+    public void BindDirectDispatch(int sender, long admissionCommand, long dispatchCommand)
+    {
+        lock (gate)
+        {
+            if (!streams.TryGetValue(sender, out var stream) || admissionCommand <= 0 ||
+                dispatchCommand <= admissionCommand || dispatchCommand > stream.Submitted ||
+                !stream.Outcomes.TryGetValue(admissionCommand, out var exit) || exit != 0 ||
+                dispatches.Count >= maximumEvents || dispatches.Any(pair => pair.Key.Sender == sender && pair.Value == dispatchCommand) ||
+                !dispatches.TryAdd((sender, admissionCommand), dispatchCommand)) rejected = true;
+        }
+    }
+
+    private long DispatchCommand(int sender, long admissionCommand) =>
+        dispatches.TryGetValue((sender, admissionCommand), out var dispatch) ? dispatch : admissionCommand;
+
     // Called only after the normal group-messages result contains exactly the
     // planned text/sequence/remote-author tuple. No payload enters this reader.
     public void RecordHistoryRead(int sender, long command, int recipient, long readCommand)
@@ -85,14 +104,30 @@ public sealed class DeliveryEventController
     {
         lock (gate)
         {
-            if (!recipients.Contains(recipient) || !Sample(sender, command, recipients).Complete ||
+            if (!recipients.Contains(recipient) || !Sample(sender, command, recipients).Complete) return double.PositiveInfinity;
+            return ObservedHistoryReadMilliseconds(sender, command, recipient);
+        }
+    }
+
+    // Diagnostic evidence survives a failed sender/ACK outcome, while Sample and
+    // HistoryReadMilliseconds retain their strict first-attempt qualification.
+    public double ObservedHistoryReadMilliseconds(int sender, long command, int recipient)
+    {
+        lock (gate)
+        {
+            if (rejected || streams.Values.Any(stream => !stream.Closed || !stream.Eof) ||
                 !historyReads.TryGetValue((sender, command, recipient), out var readCommand)) return double.PositiveInfinity;
+            var dispatch = DispatchCommand(sender, command);
+            var outgoing = rows.Where(row => row.Client == sender && row.Command == dispatch && row.Phase == "NativeOutboxDurable").ToArray();
+            if (outgoing.Length is < 1 or > 2 || outgoing.Select(row => row.MessageHash).Distinct().Count() != 1) return double.PositiveInfinity;
+            var visibleRows = rows.Where(row => row.Client == recipient && row.MessageHash == outgoing[0].MessageHash &&
+                row.Phase == "RecipientDurableReadable").ToArray();
+            if (visibleRows.Length != 1 || !outgoing.Any(row => row.DeliveryHash == visibleRows[0].DeliveryHash)) return double.PositiveInfinity;
             var accepted = rows.Single(row => row.Client == sender && row.Command == command && row.Phase == "CommandAccepted");
-            var hash = rows.First(row => row.Client == sender && row.Command == command && row.Phase == "NativeOutboxDurable").MessageHash;
-            var visible = rows.Single(row => row.Client == recipient && row.MessageHash == hash && row.Phase == "RecipientDurableReadable");
+            var visible = visibleRows[0];
             var read = rows.SingleOrDefault(row => row.Client == recipient && row.Command == readCommand && row.Phase == "CommandAccepted");
             var completed = streams[recipient].CompletedAt[readCommand];
-            return read is null || read.Timestamp < visible.Timestamp || completed < read.Timestamp
+            return read is null || visible.Timestamp < accepted.Timestamp || read.Timestamp < visible.Timestamp || completed < read.Timestamp
                 ? double.PositiveInfinity : (completed - accepted.Timestamp) * 1000.0 / frequency;
         }
     }
@@ -202,10 +237,12 @@ public sealed class DeliveryEventController
             if (recipients == null || recipients.Length is < 1 or > 2 || recipients.Distinct().Count() != recipients.Length ||
                 recipients.Any(role => role is < 1 or > 3 || role == sender)) throw new ArgumentException("Exact distinct recipient roles required.");
             var accepted = rows.SingleOrDefault(row => row.Client == sender && row.Command == command && row.Phase == "CommandAccepted");
-            var outgoing = rows.Where(row => row.Client == sender && row.Command == command && row.Phase == "NativeOutboxDurable").ToArray();
+            var dispatch = DispatchCommand(sender, command);
+            var outgoing = rows.Where(row => row.Client == sender && row.Command == dispatch && row.Phase == "NativeOutboxDurable").ToArray();
             var hashes = outgoing.Select(row => row.MessageHash).Distinct(StringComparer.Ordinal).ToArray();
             if (rejected || streams.Values.Any(stream => !stream.Closed || !stream.Eof) || !streams.TryGetValue(sender, out var senderStream) ||
                 !senderStream.Outcomes.TryGetValue(command, out var exitCode) || exitCode != 0 ||
+                !senderStream.Outcomes.TryGetValue(dispatch, out var dispatchExitCode) || dispatchExitCode != 0 ||
                 accepted == null || hashes.Length != 1 || outgoing.Length != recipients.Length ||
                 outgoing.Select(row => row.DeliveryHash).Distinct(StringComparer.Ordinal).Count() != recipients.Length) return DeliverySample.Missing();
             var visible = recipients.Select(role => rows.Where(row => row.Client == role && row.MessageHash == hashes[0] &&
@@ -214,7 +251,7 @@ public sealed class DeliveryEventController
                 !outgoing.Any(row => row.DeliveryHash == events[0].DeliveryHash)) ||
                 visible.Select(events => events[0].DeliveryHash).Distinct(StringComparer.Ordinal).Count() != recipients.Length) return DeliverySample.Missing();
             double Milliseconds(long ticks) => (ticks - accepted.Timestamp) * 1000.0 / frequency;
-            var stores = rows.Where(row => row.Client == sender && row.Command == command && row.MessageHash == hashes[0] && row.Phase == "StoreQuorum").ToArray();
+            var stores = rows.Where(row => row.Client == sender && row.Command == dispatch && row.MessageHash == hashes[0] && row.Phase == "StoreQuorum").ToArray();
             if (stores.Length != recipients.Length || stores.Any(store => !outgoing.Any(row => row.DeliveryHash == store.DeliveryHash)))
                 return DeliverySample.Missing();
             return new DeliverySample(true, Milliseconds(visible.Min(events => events[0].Timestamp)),
@@ -230,7 +267,8 @@ public sealed class DeliveryEventController
         lock (gate)
         {
             if (rejected) return false;
-            var hashes = rows.Where(row => row.Client == sender && row.Command == command && row.Phase == "NativeOutboxDurable")
+            var dispatch = DispatchCommand(sender, command);
+            var hashes = rows.Where(row => row.Client == sender && row.Command == dispatch && row.Phase == "NativeOutboxDurable")
                 .Select(row => row.MessageHash).Distinct(StringComparer.Ordinal).ToArray();
             return hashes.Length == 1 && rows.Any(row => row.Client == recipient && row.MessageHash == hashes[0] && row.Phase == "RecipientDurableReadable");
         }
@@ -242,7 +280,8 @@ public sealed class DeliveryEventController
         {
             if (!recipients.Contains(recipient) || !Sample(sender, command, recipients).Complete) return double.PositiveInfinity;
             var accepted = rows.Single(row => row.Client == sender && row.Command == command && row.Phase == "CommandAccepted");
-            var hash = rows.First(row => row.Client == sender && row.Command == command && row.Phase == "NativeOutboxDurable").MessageHash;
+            var dispatch = DispatchCommand(sender, command);
+            var hash = rows.First(row => row.Client == sender && row.Command == dispatch && row.Phase == "NativeOutboxDurable").MessageHash;
             var visible = rows.Single(row => row.Client == recipient && row.MessageHash == hash && row.Phase == "RecipientDurableReadable");
             return (visible.Timestamp - accepted.Timestamp) * 1000.0 / frequency;
         }
