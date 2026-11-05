@@ -21,7 +21,7 @@ internal sealed class CliSession(CommandLine binding) : IDisposable, IAsyncDispo
     internal void RequireBinding(CommandLine command)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
-        if (command.Area is "session" or "storage" || command.Profile != binding.Profile ||
+        if (command.Area is "session" or "storage" or "publication" || command.Profile != binding.Profile ||
             !command.Network.AsSpan().SequenceEqual(binding.Network) ||
             command.Bootstrap is not null && !StringComparer.Ordinal.Equals(command.Bootstrap, binding.Bootstrap) ||
             command.Registry is not null && !StringComparer.Ordinal.Equals(command.Registry, binding.Registry))

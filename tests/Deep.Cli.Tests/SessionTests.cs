@@ -19,7 +19,8 @@ public sealed class SessionTests
         foreach (var changed in new[] { command with { Profile = "other" },
             command with { Network = RandomNumberGenerator.GetBytes(16) },
             command with { Bootstrap = "another-bundle" }, command with { Registry = "https://other/" },
-            command with { Area = "storage", Operation = "enroll" }, binding })
+            command with { Area = "storage", Operation = "enroll" },
+            command with { Area = "publication", Operation = "enroll-archive" }, binding })
             Assert.Throws<ArgumentException>(() => session.RequireBinding(changed));
         session.Dispose();
         Assert.Throws<ObjectDisposedException>(() => session.RequireBinding(command));

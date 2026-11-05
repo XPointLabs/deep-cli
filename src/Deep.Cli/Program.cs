@@ -54,7 +54,7 @@ internal static class Program
             if (session is null && args is (["--help"] or []))
             {
                 await output.WriteLineAsync("deep <area> <command> --profile <alias> --network <32 lowercase hex> [options]\n" +
-                    "account create/status/address; storage enroll (standalone existing profile); network verify/refresh/maintain/publish; contact request/accept/stop/list/operations/route-health/route-verify/refresh-route/reintroduce-route; mailbox sync/receive; message queue/send/list/recent/pending; attachment prepare/queue/send/pending/operations/list/download; group create/invite/accept/advance/send/resume/flush/list/messages/recent\n" +
+                    "account create/status/address; storage enroll (standalone existing profile); publication enroll-archive (standalone existing profile); network verify/refresh/maintain/publish; contact request/accept/stop/list/operations/route-health/route-verify/refresh-route/reintroduce-route; mailbox sync/receive; message queue/send/list/recent/pending; attachment prepare/queue/send/pending/operations/list/download; group create/invite/accept/advance/send/resume/flush/list/messages/recent\n" +
                     "Network operations require --bootstrap <public dev bundle> --registry <canonical HTTPS origin>.\n" +
                     "request: --address --operation; accept: --conversation --operation; queue: --conversation --text; send: --conversation --operation --text.\n" +
                     "session run: bounded JSON argument arrays on stdin; one bound profile/network/bootstrap/origin, serial commands until EOF.\n" +
@@ -63,6 +63,8 @@ internal static class Program
             }
             var command = admittedCommand ?? CommandLine.Parse(args);
             ct.ThrowIfCancellationRequested();
+            if (command.Area == "publication" && session is not null)
+                throw new ArgumentException("Publication archive enrollment must run outside a session.");
             if (command.Area == "session")
             {
                 if (session is not null) throw new ArgumentException("Nested session rejected.");
@@ -82,6 +84,14 @@ internal static class Program
             recoveryAccount = profile.Accounts;
             initialStore = recoveryAccount.ExactStoreResumes; initialMailbox = recoveryAccount.ExactMailboxResumes;
             initialWaits = recoveryAccount.ExactRecoveryLeaseWaits;
+            if (command is { Area: "publication", Operation: "enroll-archive" })
+            {
+                var archive = await profile.Accounts.EnrollPublicationArchiveAsync(ct).ConfigureAwait(false);
+                await output.WriteLineAsync(JsonSerializer.Serialize(new { status = "enrolled", archive,
+                    protectionWork = work.Snapshot(),
+                    storageWork = SecureStorageWork.Delta(profile.StorageWork, initialStorageWork) }));
+                return 0;
+            }
             if (command.Area != "account")
             {
                 if (await profile.Accounts.GetCurrentAsync(ct) is null) return await FailAsync(error, "account-missing", 4);

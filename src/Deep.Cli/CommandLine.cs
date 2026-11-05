@@ -30,6 +30,7 @@ internal sealed record CommandLine(string Operation, string Profile, byte[] Netw
         {
             ("account", "create") => new[] { "--name" },
             ("storage", "enroll") => [],
+            ("publication", "enroll-archive") => [],
             ("account", "status" or "address") or ("contact", "list" or "operations") or ("message", "pending") or ("attachment", "pending" or "operations") => [],
             ("session", "run") or ("network", "verify" or "refresh" or "maintain" or "publish") or ("mailbox", "sync" or "receive") => ["--bootstrap", "--registry"],
             ("contact", "request") => ["--bootstrap", "--registry", "--address", "--operation"],

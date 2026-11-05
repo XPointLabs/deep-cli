@@ -11,6 +11,22 @@ namespace Deep.Cli.Tests;
 public sealed class StorageLifecycleTests
 {
     [Fact]
+    public async Task PublicationArchiveEnrollmentIsExplicitAndRejectsSessionBeforeProfileAccess()
+    {
+        using var f = new Fixture();
+        var args = f.Args("publication", "enroll-archive");
+        var command = CommandLine.Parse(args);
+        Assert.Equal("publication", command.Area);
+        foreach (var option in new[] { "--reset", "--force", "--name", "--bootstrap", "--registry", "--operation" })
+            Assert.Throws<ArgumentException>(() => CommandLine.Parse([.. args, option, "rejected"]));
+        using var session = new CliSession(command with { Area = "session", Operation = "run" });
+        using var output = new StringWriter(); using var error = new StringWriter();
+        Assert.Equal(2, await Program.RunAsync(args, output, error, default, session));
+        Assert.Equal("", output.ToString());
+        Assert.False(Directory.Exists(f.Root));
+    }
+
+    [Fact]
     public async Task EnrollmentIsExplicitScopedAndRejectedInsideSessionBeforeProfileAccess()
     {
         using var f = new Fixture();
@@ -29,7 +45,7 @@ public sealed class StorageLifecycleTests
     public async Task MissingOrdinaryOrEnrollmentProfileDoesNotCreateStateAndCreationCannotReplacePriorNativeFiles()
     {
         using var f = new Fixture();
-        foreach (var args in new[] { f.Args("account", "status"), f.Args("storage", "enroll") })
+        foreach (var args in new[] { f.Args("account", "status"), f.Args("storage", "enroll"), f.Args("publication", "enroll-archive") })
         {
             using var output = new StringWriter(); using var error = new StringWriter();
             Assert.Equal(5, await Program.RunAsync(args, output, error));

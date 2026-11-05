@@ -216,6 +216,7 @@ Alongside `--profile` and `--network`, commands accept:
 | Command | Additional options |
 | --- | --- |
 | `storage enroll` | none; standalone existing-namespace conversion, no network I/O or authority/transport/reset overrides |
+| `publication enroll-archive` | none; standalone lossless enrollment of completed publications into protected archive custody; reports only working/archive counts, bytes and quota reservation readiness |
 | `network verify`, `network maintain` | `--bootstrap`, `--registry`, optional `--known-contacts` |
 | `network publish`, `network refresh` | `--bootstrap`, `--registry`; no known-contact side effects |
 | `contact request` | network options, `--address`, `--operation` |

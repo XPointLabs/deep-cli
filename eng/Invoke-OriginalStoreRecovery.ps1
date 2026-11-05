@@ -3,6 +3,7 @@ param(
     [Parameter(Mandatory)][string]$BootstrapDirectory,
     [Parameter(Mandatory)][string]$RegistryOrigin,
     [Parameter(Mandatory)][string]$RunDirectory,
+    [string]$ExecutablePath,
     [Parameter(Mandatory)][ValidatePattern('^[a-z][a-z0-9-]{0,31}$')][string]$SenderProfile,
     [Parameter(Mandatory)][ValidatePattern('^[a-z][a-z0-9-]{0,31}$')][string]$ReceiverProfile,
     [switch]$ReceiveOnly
@@ -14,6 +15,11 @@ $run=[IO.Path]::GetFullPath($RunDirectory)
 $root=[IO.Path]::GetFullPath((Join-Path $repo 'artifacts'))+[IO.Path]::DirectorySeparatorChar
 if(-not $run.StartsWith($root,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $run) -or $SenderProfile -ceq $ReceiverProfile){throw 'Fresh artifact directory and distinct retained profiles required'}
 $exe=Join-Path $repo 'src/Deep.Cli/bin/Release/net10.0-windows/deep.exe'
+if($PSBoundParameters.ContainsKey('ExecutablePath')){
+    $exe=[IO.Path]::GetFullPath($ExecutablePath)
+    if(-not $exe.StartsWith($root,[StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($exe) -cne 'deep.exe' -or
+        -not (Test-Path -LiteralPath $exe -PathType Leaf)){throw 'Archived repo-owned deep.exe required'}
+}
 foreach($path in @($run,$exe,$BootstrapDirectory)){
     for($cursor=[IO.Path]::GetFullPath($path);$cursor;$cursor=[IO.Path]::GetDirectoryName($cursor)){
         if((Test-Path -LiteralPath $cursor) -and ((Get-Item -LiteralPath $cursor).Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'Linked recovery input rejected'}
