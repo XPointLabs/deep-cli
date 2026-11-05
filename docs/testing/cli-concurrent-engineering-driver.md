@@ -17,8 +17,12 @@ unavailable until the larger architecture is accepted.
 The driver archives its runtime and exact helper sources and writes the complete
 population before opening clients. Preflight requires existing accounts, exact
 mutual contact consent, one matching Active/epoch2/three-member group, matching
-native history/command counts, and all six current retained route intervals.
-Interval diagnostics supply no send authority: the existing Shared operations
+native history/command counts, and strict verification of all six current routes
+through `contact route-verify`. That command calls Shared's actual native current-L
+verifier and returns closed success without exporting a descriptor or capability.
+The `route-health` predicates remain informational in the command diagnostics;
+the original inbound XUR interval can be historical after a current count8 route
+was adopted. It cannot qualify or reject current L. The existing Shared operations
 independently validate every effect. Expiry, mismatch or failure stops; there is
 no contact repair, publication, account creation, group resume or reset.
 

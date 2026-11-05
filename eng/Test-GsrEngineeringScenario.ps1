@@ -50,6 +50,11 @@ foreach($bad in @(-1L,'0',0.0,$null)){
 }
 Reject {Read-RecoveryWork ([pscustomobject]@{recoveryWork=[pscustomobject]@{storeResumes=0L;mailboxResumes=0L}}) $true}
 $source=Get-Content -LiteralPath $scenario -Raw
+Require ($source.Contains("@('contact','route-verify'") -and
+    $source.IndexOf("@('contact','route-verify'") -lt $source.IndexOf('$cohortValidated=$true')) 'Strict current route verification must precede cohort admission.'
+$historicalGates=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.CommandAst] -and
+    $node.GetCommandName() -ceq 'Require' -and $node.Extent.Text.Contains('UpdateIntervalCoversNow')},$true))
+Require ($historicalGates.Count -eq 0) 'Historical XUR intervals cannot qualify current route admission.'
 Require ($source.Contains('Start-Command $sender') -and $source.Contains("Start-Command `$role 'receive-ack'")) 'Sender and recipient submissions must be independent.'
 Require ($source.Contains('$watch.ElapsedMilliseconds -lt $SampleBudgetMilliseconds') -and $source.Contains('$pages[$role] -ge $MaximumReceivePages')) 'Receive scheduling requires both time and work bounds.'
 $cadence=@($ast.ParamBlock.Parameters|Where-Object {$_.Name.VariablePath.UserPath -ceq 'EmptyPollIntervalMilliseconds'})[0]

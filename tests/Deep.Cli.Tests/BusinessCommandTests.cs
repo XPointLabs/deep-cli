@@ -55,6 +55,7 @@ public sealed class BusinessCommandTests
 
     [Theory]
     [InlineData("route-health")]
+    [InlineData("route-verify")]
     [InlineData("refresh-route")]
     public void RouteCommandsRequireExistingConversationAndHaveNoCallerAuthoredInputs(string verb)
     {
@@ -65,6 +66,8 @@ public sealed class BusinessCommandTests
         Assert.Equal(verb, parsed.Operation);
         Assert.Throws<ArgumentException>(() => CommandLine.Parse(["contact", verb, .. common,
             "--conversation", Conversation, "--operation", Operation]));
+        Assert.Throws<ArgumentException>(() => CommandLine.Parse(["contact", verb, .. common,
+            "--conversation", Conversation, "--route", "caller-authored-route"]));
         var health = new Deep.Client.Shared.Services.DeepIdV2ContactRouteHealth(false, false, true);
         using var json = JsonDocument.Parse(JsonSerializer.Serialize(health));
         Assert.Equal(3, json.RootElement.EnumerateObject().Count());

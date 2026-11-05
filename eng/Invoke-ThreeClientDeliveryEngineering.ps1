@@ -122,6 +122,13 @@ function Complete-Command([int]$role,[int]$budget){
             Record-Failure $(if($response.ExitCode -eq 130){'CommandTimeout'}else{'CommandError'}) $item.Phase
             $steps.Add([pscustomobject]$row);$script:commandFailed=$true;return $null
         }
+        if($item.Phase -ceq 'retained-route-intervals'){
+            $row['retainedRouteHealth']=[pscustomobject]@{
+                AdvertisementIntervalCoversNow=$result.health.AdvertisementIntervalCoversNow
+                UpdateIntervalCoversNow=$result.health.UpdateIntervalCoversNow
+                RouteFaultRetained=$result.health.RouteFaultRetained
+            }
+        }
         $recovery=Read-RecoveryWork $result ($item.Phase -cne 'retained-account')
         if($result.PSObject.Properties.Name -contains 'nativeStorageWork' -and $result.nativeStorageWork.rejected){
             $steps.Add([pscustomobject]$row);Record-Failure 'NativeCounterShapeRejected' $item.Phase;$script:commandFailed=$true;return $null
@@ -177,8 +184,11 @@ try{
         Require ($null -ne $conversation) 'Existing mutual consent required; no contact setup or repair.' 'CohortRejected'
         $pairs[(Pair-Key $left $right)]=$conversation
         foreach($role in @($left,$right)){
-            $health=(Call $role 'current-route-intervals' (@('contact','route-health','--conversation',$conversation)+$networkArgs)).health
-            Require ($health.AdvertisementIntervalCoversNow -and $health.UpdateIntervalCoversNow -and -not $health.RouteFaultRetained) 'Current retained route intervals required; no repair.' 'RouteExpiredOrFaulted'
+            # Original XUR health is historical information. The strict Shared
+            # verifier reads actual current L and retains all live owner guards.
+            [void](Call $role 'retained-route-intervals' (@('contact','route-health','--conversation',$conversation)+$networkArgs))
+            $verified=Call $role 'current-route-verification' (@('contact','route-verify','--conversation',$conversation)+$networkArgs)
+            Require ($verified.routeVerified -ceq $true) 'Current route verification required; no repair.' 'RouteExpiredOrFaulted'
         }
     }}
     $cohortValidated=$true

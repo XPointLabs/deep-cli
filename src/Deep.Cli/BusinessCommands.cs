@@ -58,6 +58,12 @@ internal static class BusinessCommands
                 ? network.EstablishedMessagingSource : network.Source;
             if (command is { Area: "contact", Operation: "route-health" })
                 return new { status = "ok", health = await accounts.ReadContactRouteHealthAsync(conversation!, network.Source, ct) };
+            if (command is { Area: "contact", Operation: "route-verify" })
+            {
+                phase = "ContactRouteVerification";
+                await accounts.RequireCurrentContactRouteAsync(conversation!, network.Source, ct);
+                return new { status = "ok", routeVerified = true };
+            }
             if (command is { Area: "contact", Operation: "refresh-route" })
             {
                 phase = "ContactRouteMaintenance";
