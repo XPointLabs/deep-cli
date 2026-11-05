@@ -118,6 +118,7 @@ function Read-ClosedFailure($result){
     $checks+=@('Expired','RateLimited','StaleView','Conflict','OutcomeUnknown','SizeFailure','RecordTooLarge'|ForEach-Object {'GroupControl'+$_})
     $checks+=@('Lifecycle','Network','Membership','Epoch','Issuer','Generation','IssuerWindow','RouteExpiry','Lifetime','Signature'|ForEach-Object {'Grant'+$_})
     $checks+=@('GrantHorizon','GrantOverlap','RequestInterval','GrantStart','ResponseDeadline','IssuedBeforeRequest','IssuedAfterRequest','IssuedAfterCurrentUpper'|ForEach-Object {'RetainedRead'+$_})
+    $checks+=@('FutureCreation','ExpiredAnnouncement','CreationOutsideSignedRoute'|ForEach-Object {'HistoryAnnouncement'+$_})
     foreach($artifact in @('XNA1','XNV1','XNH1','ADH1','DeviceCertificate','DCA1','PMT2','XRA1','PMS2','XRC1','XSS1','XIR1V2','XRR1','ThresholdAuthoring','ResolveRequest')){
         foreach($reason in @('InvalidInterval','NotBefore','Expiry')){$checks+='RouteTime'+$artifact+$reason}
     }

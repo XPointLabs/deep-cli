@@ -5,6 +5,43 @@ namespace Deep.Cli.Tests;
 public sealed class BusinessCommandTests
 {
     [Theory]
+    [InlineData("FutureCreation", "HistoryAnnouncementFutureCreation")]
+    [InlineData("ExpiredAnnouncement", "HistoryAnnouncementExpiredAnnouncement")]
+    [InlineData("CreationOutsideSignedRoute", "HistoryAnnouncementCreationOutsideSignedRoute")]
+    [InlineData("DO-NOT-EXPORT", "Unclassified")]
+    public void CurrentHistoryAnnouncementDiagnosticsExportOnlyClosedProducerReasons(string input, string expected)
+    {
+        var error = new System.Security.Cryptography.CryptographicException("DO-NOT-EXPORT");
+        error.Data["Deep.ContactRouteHistoryAnnouncement.Check"] = input;
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(new CliBusinessException("ContactRouteVerification", error).ClosedDiagnostic()));
+        var cause = json.RootElement.GetProperty("causes")[0];
+        Assert.Equal(expected, cause.GetProperty("check").GetString());
+        Assert.Equal("ProtectedState", cause.GetProperty("category").GetString());
+        Assert.DoesNotContain("DO-NOT-EXPORT", json.RootElement.GetRawText());
+    }
+
+    [Fact]
+    public void CurrentHistoryAnnouncementDiagnosticsDoNotInferReasonsFromTextOtherKeysOrExceptionSubtypes()
+    {
+        var errors = new System.Security.Cryptography.CryptographicException[]
+        {
+            new("Announcement is outside its own or the signed route's current windows."),
+            new("DO-NOT-EXPORT"), new("DO-NOT-EXPORT"), new UntrustedHistoryCryptoException()
+        };
+        errors[1].Data["Deep.ContactRouteHistoryAnnouncement.Check"] = 1;
+        errors[2].Data["unrelated"] = "ExpiredAnnouncement";
+        errors[3].Data["Deep.ContactRouteHistoryAnnouncement.Check"] = "ExpiredAnnouncement";
+        foreach (var error in errors)
+        {
+            using var json = JsonDocument.Parse(JsonSerializer.Serialize(new CliBusinessException("ContactRouteVerification", error).ClosedDiagnostic()));
+            Assert.Equal("Unclassified", json.RootElement.GetProperty("causes")[0].GetProperty("check").GetString());
+            Assert.DoesNotContain("DO-NOT-EXPORT", json.RootElement.GetRawText());
+        }
+    }
+
+    private sealed class UntrustedHistoryCryptoException() : System.Security.Cryptography.CryptographicException("DO-NOT-EXPORT") { }
+
+    [Theory]
     [InlineData(429, "DirectoryRateLimited")]
     [InlineData(503, "DirectoryUnavailable")]
     public void DirectoryDiagnosticsDistinguishOnlyClosedHttpStates(int status, string expected)

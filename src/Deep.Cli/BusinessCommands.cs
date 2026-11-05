@@ -213,6 +213,10 @@ internal sealed class CliBusinessException(string phase, Exception error) : Exce
                 new[] { "Expired", "RateLimited", "StaleView", "Conflict", "OutcomeUnknown", "SizeFailure", "RecordTooLarge" }.Contains(groupStatus, StringComparer.Ordinal))
                 check = "GroupControl" + groupStatus;
             var exceptionType = current.GetType();
+            if (exceptionType == typeof(CryptographicException) &&
+                current.Data["Deep.ContactRouteHistoryAnnouncement.Check"] is string historyReason &&
+                new[] { "FutureCreation", "ExpiredAnnouncement", "CreationOutsideSignedRoute" }.Contains(historyReason, StringComparer.Ordinal))
+                check = "HistoryAnnouncement" + historyReason;
             if (current is CryptographicException && exceptionType.Assembly == typeof(CryptographicException).Assembly &&
                 current.Data["Deep.MailboxGrant.Check"] is string grantReason &&
                 new[] { "Lifecycle", "Network", "Membership", "Epoch", "Issuer", "Generation", "IssuerWindow", "RouteExpiry", "Lifetime", "Signature" }.Contains(grantReason, StringComparer.Ordinal))

@@ -77,6 +77,12 @@ Require ($closed.diagnostic.causes[0].trail[0].method -ceq 'Unavailable' -and $c
 $unknown=Read-ClosedFailure ([pscustomobject]@{code='never-export';diagnostic=[pscustomobject]@{phase='never-export';causes=@([pscustomobject]@{category='never-export';check='never-export';method='never-export';il=-2})}})
 Require ($unknown.code -ceq 'Unclassified' -and $unknown.diagnostic.phase -ceq 'Unclassified' -and
     $unknown.diagnostic.causes[0].category -ceq 'Other' -and $unknown.diagnostic.causes[0].check -ceq 'Unclassified') 'Unknown diagnostic values require closed replacements.'
+foreach($reason in @('FutureCreation','ExpiredAnnouncement','CreationOutsideSignedRoute')){
+    $historyFailure=Read-ClosedFailure ([pscustomobject]@{code='business-operation-failed';payload='never-export';diagnostic=[pscustomobject]@{
+        phase='ContactRouteVerification';causes=@([pscustomobject]@{category='ProtectedState';check=('HistoryAnnouncement'+$reason);message='never-export'})}})
+    Require ($historyFailure.diagnostic.causes[0].check -ceq ('HistoryAnnouncement'+$reason) -and
+        -not ($historyFailure|ConvertTo-Json -Depth 8 -Compress).Contains('never-export')) 'Closed current-history reasons must survive the frame consumer without payload or exception text.'
+}
 $many=[pscustomobject]@{category='Other';check='Unclassified';method='Unavailable';il=-1;trail=@(1..12|ForEach-Object {[pscustomobject]@{method='Unavailable';il=-1}})}
 $bounded=Read-ClosedFailure ([pscustomobject]@{code='business-operation-failed';diagnostic=[pscustomobject]@{phase='MailboxSync';causes=@(1..12|ForEach-Object {$many})}})
 Require ($bounded.diagnostic.causes.Count -eq 8 -and $bounded.diagnostic.causes[0].trail.Count -eq 8) 'Diagnostic cause/trail bounds must remain eight.'
