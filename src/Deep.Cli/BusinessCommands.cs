@@ -39,13 +39,15 @@ internal static class BusinessCommands
                     : await accounts.ListGroupMessagesAsync(Convert.FromHexString(command.Group!), ct)).Select(item =>
                     new { text = item.Text, local = item.IsLocalAuthor, sequence = item.Sequence }).ToArray() };
 
+            if (command is { Area: "message", Operation: "recent" })
+                return new { status = "ok", items = (await accounts.ListRecentMessagesAsync(command.Conversation!, command.Limit, ct)).Select(x => new
+                { text = x.Text, local = x.IsLocalAuthor, createdAt = x.CreatedAt }).ToArray() };
+
             DeepIdV2Conversation? conversation = null;
             if (command.Conversation is not null)
                 conversation = (await accounts.GetConversationAsync(command.Conversation, ct)).Conversation;
-            if (command is { Area: "message", Operation: "list" or "recent" })
-                return new { status = "ok", items = (command.Operation == "recent"
-                    ? await accounts.ListRecentMessagesAsync(conversation!, command.Limit, ct)
-                    : await accounts.ListMessagesAsync(conversation!, ct)).Select(x => new
+            if (command is { Area: "message", Operation: "list" })
+                return new { status = "ok", items = (await accounts.ListMessagesAsync(conversation!, ct)).Select(x => new
                 { text = x.Text, local = x.IsLocalAuthor, createdAt = x.CreatedAt }).ToArray() };
             if (command is { Area: "attachment", Operation: "list" })
                 return new { status = "ok", items = await accounts.ListAttachmentsAsync(conversation!, ct) };
