@@ -9,7 +9,10 @@ param(
  [ValidateRange(1000,330000)][int]$SampleBudgetMilliseconds=120000,
  [ValidateRange(0,2)][int]$RecoveryAttempts=1,
  [ValidateRange(0,900)][int]$IdleSeconds=180,
- [ValidateRange(60,1800)][int]$ReadinessBudgetSeconds=300,
+ [ValidateRange(0,1)][int]$WarmupCount=1,
+ [switch]$GroupOnly,
+ [switch]$GroupFirstByRole,
+ [ValidateRange(0,1800)][int]$ReadinessBudgetSeconds=300,
  [string]$StopMarkerPath
 )
 Set-StrictMode -Version Latest
@@ -43,15 +46,20 @@ Import-Module (Join-Path $engineering 'GsrCohort.psm1') -Force
 # The denominator and original asymmetric cursors exist before opening a host.
 # B64 is retained. No balancing message or replacement command is authored.
 $population=[Collections.Generic.List[object]]::new()
-foreach($kind in @('Direct','Group')){
+foreach($kind in $(if($GroupOnly){@('Group')}else{@('Direct','Group')})){
  $rounds=if($kind -ceq 'Direct'){$DirectRounds}else{$GroupRounds}
- foreach($round in 0..$rounds){foreach($sender in 1..3){
+ foreach($round in $(if($WarmupCount -eq 0){1..$rounds}else{0..$rounds})){foreach($sender in 1..3){
   $recipients=if($kind -ceq 'Direct'){@(1..3|Where-Object {$_ -ne $sender})}else{@(0)}
-  foreach($recipient in $recipients){$population.Add([pscustomobject]@{kind=$kind;round=$round;warmup=($round -eq 0);sender=$sender;recipient=$recipient;sequence=$(if($kind -ceq 'Group'){@(63,64,63)[$sender-1]+$round+1}else{$round});submitted=$false;command=0L;dispatch=0L;outcome='NotSubmitted';recovery=$false;recovered=$false;ack=$false;readWithoutOwnedAckPage=$false;duplicatesChecked=$false;reads=@();externalReadMilliseconds=@()})}
+  foreach($recipient in $recipients){$population.Add([pscustomobject]@{kind=$kind;round=$round;warmup=($round -eq 0);sender=$sender;recipient=$recipient;sequence=$(if($kind -ceq 'Group'){@(63,64,63)[$sender-1]+$round+$WarmupCount}else{$round});submitted=$false;command=0L;dispatch=0L;outcome='NotSubmitted';recovery=$false;recovered=$false;ack=$false;readWithoutOwnedAckPage=$false;duplicatesChecked=$false;reads=@();externalReadMilliseconds=@()})}
  }}
 }
+if($GroupFirstByRole){
+ $ordered=[Collections.Generic.List[object]]::new()
+ foreach($role in 1..3){foreach($kind in @('Group','Direct')){foreach($sample in @($population|Where-Object {$_.sender -eq $role -and $_.kind -ceq $kind})){$ordered.Add($sample)}}}
+ $population=$ordered
+}
 $population.ToArray()|ConvertTo-Json -Depth 4|Set-Content -LiteralPath (Join-Path $run 'population.json') -Encoding utf8
-[ordered]@{schema='deep.cli.balanced-plan.v1';directMeasured=6*$DirectRounds;groupMeasured=3*$GroupRounds;warmup=9;startHistory=190;startLocal=@(63,64,63);firstAttemptOnly=$true;sampleBudgetMilliseconds=$SampleBudgetMilliseconds;recoveryAttempts=$RecoveryAttempts;idleSeconds=$IdleSeconds;readinessBudgetSeconds=$ReadinessBudgetSeconds;releaseQualified=$false;sourceHashes=$sourceHashes;runtimeHashes=$runtimeHashes}|ConvertTo-Json -Depth 4|Set-Content -LiteralPath (Join-Path $run 'plan.json') -Encoding utf8
+[ordered]@{schema='deep.cli.balanced-plan.v1';directMeasured=$(if($GroupOnly){0}else{6*$DirectRounds});groupOnly=[bool]$GroupOnly;groupFirstByRole=[bool]$GroupFirstByRole;groupMeasured=3*$GroupRounds;warmup=($(if($GroupOnly){3}else{9})*$WarmupCount);warmupCount=$WarmupCount;processesReopened=$true;startHistory=190;startLocal=@(63,64,63);firstAttemptOnly=$true;sampleBudgetMilliseconds=$SampleBudgetMilliseconds;recoveryAttempts=$RecoveryAttempts;idleSeconds=$IdleSeconds;readinessBudgetSeconds=$ReadinessBudgetSeconds;releaseQualified=$false;sourceHashes=$sourceHashes;runtimeHashes=$runtimeHashes}|ConvertTo-Json -Depth 4|Set-Content -LiteralPath (Join-Path $run 'plan.json') -Encoding utf8
 $controller=New-DeliveryEventController -MaximumEvents 100000
 $sessions=@{};$contacts=@{};$addresses=@{};$books=@{};$pairs=@{};$pending=@{};$blocked=@{};$group=$null;$beforeGenerations=@{};$routeVerification=[Collections.Generic.List[object]]::new();$lastCompleteGenerationProof=@();$generationProof=[Collections.Generic.List[object]]::new()
 $steps=[Collections.Generic.List[object]]::new();$initial=[Collections.Generic.List[object]]::new();$final=[Collections.Generic.List[object]]::new();$originals=[Collections.Generic.List[object]]::new()
@@ -162,26 +170,33 @@ try{
  # Observe natural scheduler work for the configured bounded interval. The
  # following ordinary health/route probes may preempt background maintenance;
  # lifecycle verdicts remain separate from actual strict delivery authority.
- $readiness=[Diagnostics.Stopwatch]::StartNew();$routeVerification=[Collections.Generic.List[object]]::new()
- while($readiness.Elapsed.TotalSeconds -lt $ReadinessBudgetSeconds -and -not (Stop-Requested)){
-  $controller.MaintenanceSummary()|ConvertTo-Json -Depth 8|Set-Content -LiteralPath (Join-Path $run 'maintenance-progress.json') -Encoding utf8
-  Start-Sleep -Seconds 1
+ $routeVerification=[Collections.Generic.List[object]]::new();$deliveryReady=$false
+ $quietStages=if($ReadinessBudgetSeconds -eq 0){@(0)}elseif($ReadinessBudgetSeconds -le 300){@($ReadinessBudgetSeconds)}else{@(300,($ReadinessBudgetSeconds-300))}
+ foreach($quietSeconds in $quietStages){
+  $readiness=[Diagnostics.Stopwatch]::StartNew()
+  while($readiness.Elapsed.TotalSeconds -lt $quietSeconds -and -not (Stop-Requested)){
+   $controller.MaintenanceSummary()|ConvertTo-Json -Depth 8|Set-Content -LiteralPath (Join-Path $run 'maintenance-progress.json') -Encoding utf8
+   Start-Sleep -Seconds 1
+  }
+  $generationProof.Clear();$routeVerification.Clear()
+  foreach($role in 1..3){foreach($peer in 1..3|Where-Object {$_ -ne $role}){
+   $r=Call $role 'background-readiness-health' (@('contact','route-health','--conversation',$pairs[(Pair $role $peer)])+$net)
+   $current=$false;$adopted=$false;$after=$null
+   if($r.ExitCode -eq 0){$h=$r.Result.health;$after=$(if($h.PSObject.Properties.Name -contains 'UpdateGeneration'){$h.UpdateGeneration}else{$null});$adopted=$h.RouteFaultRetained -eq $false -and $null -ne $after -and $after -ge 1;$current=$adopted -and $h.UpdateIntervalCoversNow -eq $true}
+   $before=$beforeGenerations[($role.ToString()+':'+$peer)];$generationProof.Add([pscustomobject]@{role=$role;peer=$peer;before=$before;after=$after;advanced=($null -ne $before -and $null -ne $after -and $after -gt $before);current=$current;adopted=$adopted})
+  }}
+  if($generationProof.Count -eq 6){$lastCompleteGenerationProof=@($generationProof.ToArray())}
+  foreach($role in 1..3){foreach($peer in 1..3|Where-Object {$_ -ne $role}){
+   $v=Call $role 'ready-route' (@('contact','route-verify','--conversation',$pairs[(Pair $role $peer)])+$net)
+   $verified=$v.ExitCode -eq 0 -and $v.Result.status -ceq 'ok' -and $v.Result.routeVerified -eq $true
+   $routeVerification.Add([pscustomobject]@{role=$role;peer=$peer;verified=$verified;exit=$v.ExitCode})
+   $routeKey='Route:'+$role+':'+$peer
+   if($verified){$blocked.Remove($routeKey)}else{$blocked[$routeKey]=$true}
+  }}
+  Require (-not $script:safety -and -not $script:stopRequested)
+  $deliveryReady=@($routeVerification|Where-Object {-not $_.verified}).Count -eq 0
+  if($deliveryReady){break}
  }
- $generationProof.Clear()
- foreach($role in 1..3){foreach($peer in 1..3|Where-Object {$_ -ne $role}){
-  $r=Call $role 'background-readiness-health' (@('contact','route-health','--conversation',$pairs[(Pair $role $peer)])+$net)
-  $current=$false;$adopted=$false;$after=$null
-  if($r.ExitCode -eq 0){$h=$r.Result.health;$after=$(if($h.PSObject.Properties.Name -contains 'UpdateGeneration'){$h.UpdateGeneration}else{$null});$adopted=$h.RouteFaultRetained -eq $false -and $null -ne $after -and $after -ge 1;$current=$adopted -and $h.UpdateIntervalCoversNow -eq $true}
-  $before=$beforeGenerations[($role.ToString()+':'+$peer)];$generationProof.Add([pscustomobject]@{role=$role;peer=$peer;before=$before;after=$after;advanced=($null -ne $before -and $null -ne $after -and $after -gt $before);current=$current;adopted=$adopted})
- }}
- if($generationProof.Count -eq 6){$lastCompleteGenerationProof=@($generationProof.ToArray())}
- foreach($role in 1..3){foreach($peer in 1..3|Where-Object {$_ -ne $role}){
-  $v=Call $role 'ready-route' (@('contact','route-verify','--conversation',$pairs[(Pair $role $peer)])+$net)
-  $verified=$v.ExitCode -eq 0 -and $v.Result.status -ceq 'ok' -and $v.Result.routeVerified -eq $true
-  $routeVerification.Add([pscustomobject]@{role=$role;peer=$peer;verified=$verified;exit=$v.ExitCode})
-  if(-not $verified){$blocked[('Route:'+$role+':'+$peer)]=$true}
- }}
- Require (-not $script:safety -and -not $script:stopRequested)
  $setup=$true
  foreach($sample in $population){
   $script:sampleInFlight=$false
@@ -189,6 +204,11 @@ try{
   if($script:safety){$sample.outcome='SafetyNotSubmitted';continue}
   $sender=$sample.sender;$recipients=@(if($sample.kind -ceq 'Direct'){$sample.recipient}else{1..3|Where-Object {$_ -ne $sender}})
   $conversation=$pairs[(Pair $sender $recipients[0])]
+  if($GroupOnly){foreach($peer in $recipients){
+   $guard=Call $sender 'group-admission-route' (@('contact','route-verify','--conversation',$pairs[(Pair $sender $peer)])+$net)
+   $routeKey='Route:'+$sender+':'+$peer
+   if($guard.ExitCode -eq 0 -and $guard.Result.routeVerified -eq $true){$blocked.Remove($routeKey)}else{$blocked[$routeKey]=$true}
+  }}
   $dependencies=@(foreach($peer in $recipients){'Pair:'+(Pair $sender $peer);'Route:'+$sender+':'+$peer})
   if($sample.kind -ceq 'Group'){$dependencies+=@('Group:'+$sender)}
   if(@($dependencies|Where-Object {$blocked.ContainsKey($_)}).Count -gt 0 -or @(@($sender)+$recipients|Where-Object {$blocked.ContainsKey('host'+$_)}).Count){$sample.outcome='DependencyNotSubmitted';continue}
@@ -291,17 +311,27 @@ finally{
  $samples=@(foreach($sample in $population){
   $recipients=[int[]]@(if($sample.kind -ceq 'Direct'){$sample.recipient}else{1..3|Where-Object {$_ -ne $sample.sender}})
   $timings=@(foreach($recipient in $recipients){$ms=$controller.ValidatedHistoryReadMilliseconds($sample.sender,$sample.command,$recipient);$observed=$controller.ObservedValidatedHistoryReadMilliseconds($sample.sender,$sample.command,$recipient);[pscustomobject]@{recipient=$recipient;milliseconds=$(if([double]::IsFinite($ms)){$ms}else{$null});positiveInfinity=(-not [double]::IsFinite($ms));observedMilliseconds=$(if([double]::IsFinite($observed)){$observed}else{$null});observedPositiveInfinity=(-not [double]::IsFinite($observed))}})
+  for($i=0;$i -lt $timings.Count;$i++){
+   $role=$timings[$i].recipient;$index=-1
+   for($j=0;$j -lt $sample.reads.Count;$j++){if($sample.reads[$j].recipient -eq $role){$index=$j;break}}
+   $external=$index -ge 0 -and $index -lt $sample.externalReadMilliseconds.Count
+   $timings[$i]|Add-Member -NotePropertyName externalMilliseconds -NotePropertyValue $(if($external){[double]$sample.externalReadMilliseconds[$index]}else{$null})
+   $timings[$i]|Add-Member -NotePropertyName externalPositiveInfinity -NotePropertyValue (-not $external)
+  }
+  $externalComplete=@($timings|Where-Object externalPositiveInfinity).Count -eq 0
   $finite=$sample.outcome -ceq 'Success' -and -not $sample.recovery -and $sample.ack -and $sample.duplicatesChecked -and $closed -and $unchanged -and $integrity -and -not $script:safety -and -not $controller.Rejected -and @($timings|Where-Object positiveInfinity).Count -eq 0
   $observedFinite=$closed -and $unchanged -and @($timings|Where-Object observedPositiveInfinity).Count -eq 0
-  [pscustomobject]@{kind=$sample.kind;round=$sample.round;warmup=$sample.warmup;sender=$sample.sender;recipient=$sample.recipient;sequence=$sample.sequence;submitted=$sample.submitted;admitted=$controller.HasCommandAdmission($sample.sender,$sample.command);outcome=$sample.outcome;recovery=$sample.recovery;recovered=$sample.recovered;ack=$sample.ack;readWithoutOwnedAckPage=$sample.readWithoutOwnedAckPage;duplicatesChecked=$sample.duplicatesChecked;positiveInfinity=(-not $finite);milliseconds=$(if($finite){($timings.milliseconds|Measure-Object -Maximum).Maximum}else{$null});observedPositiveInfinity=(-not $observedFinite);observedMilliseconds=$(if($observedFinite){($timings.observedMilliseconds|Measure-Object -Maximum).Maximum}else{$null});observedExternalReadMilliseconds=$sample.externalReadMilliseconds;recipients=$timings}
+  [pscustomobject]@{kind=$sample.kind;round=$sample.round;warmup=$sample.warmup;sender=$sample.sender;recipient=$sample.recipient;sequence=$sample.sequence;submitted=$sample.submitted;admitted=$controller.HasCommandAdmission($sample.sender,$sample.command);outcome=$sample.outcome;recovery=$sample.recovery;recovered=$sample.recovered;ack=$sample.ack;readWithoutOwnedAckPage=$sample.readWithoutOwnedAckPage;duplicatesChecked=$sample.duplicatesChecked;positiveInfinity=(-not $finite);milliseconds=$(if($finite){($timings.milliseconds|Measure-Object -Maximum).Maximum}else{$null});observedPositiveInfinity=(-not $observedFinite);observedMilliseconds=$(if($observedFinite){($timings.observedMilliseconds|Measure-Object -Maximum).Maximum}else{$null});externalPositiveInfinity=(-not $externalComplete);externalMilliseconds=$(if($externalComplete){($timings.externalMilliseconds|Measure-Object -Maximum).Maximum}else{$null});observedExternalReadMilliseconds=$sample.externalReadMilliseconds;recipients=$timings}
  })
- $stats=@(foreach($kind in @('Direct','Group')){
+ $stats=@(foreach($kind in $(if($GroupOnly){@('Group')}else{@('Direct','Group')})){
   $cohort=@($samples|Where-Object {$_.kind -ceq $kind -and -not $_.warmup});$values=[double[]]@($cohort|ForEach-Object {if($_.positiveInfinity){[double]::PositiveInfinity}else{[double]$_.milliseconds}})
   $p95=[Deep.Cli.Measurement.DeliveryEventController]::NearestRank($values,.95)
   $observedValues=[double[]]@($cohort|ForEach-Object {if($_.observedPositiveInfinity){[double]::PositiveInfinity}else{[double]$_.observedMilliseconds}});$observedP95=[Deep.Cli.Measurement.DeliveryEventController]::NearestRank($observedValues,.95)
-  [pscustomobject]@{kind=$kind;n=$cohort.Count;rank=[int][Math]::Ceiling(.95*$cohort.Count);submitted=@($cohort|Where-Object submitted).Count;admitted=@($cohort|Where-Object admitted).Count;notSubmitted=@($cohort|Where-Object {-not $_.submitted}).Count;deadlines=@($cohort|Where-Object outcome -eq 'Deadline').Count;errors=@($cohort|Where-Object outcome -eq 'FirstAttemptFailure').Count;withRecovery=@($cohort|Where-Object recovery).Count;finite=@($cohort|Where-Object {-not $_.positiveInfinity}).Count;missingOrFailed=@($cohort|Where-Object positiveInfinity).Count;p95Milliseconds=$(if([double]::IsFinite($p95)){$p95}else{$null});positiveInfinity=[double]::IsPositiveInfinity($p95);observedFinite=@($cohort|Where-Object {-not $_.observedPositiveInfinity}).Count;observedMissing=@($cohort|Where-Object observedPositiveInfinity).Count;observedP95Milliseconds=$(if([double]::IsFinite($observedP95)){$observedP95}else{$null});observedPositiveInfinity=[double]::IsPositiveInfinity($observedP95);observedIncludesRecovery=$true}
+  $externalValues=[double[]]@($cohort|ForEach-Object {if($_.externalPositiveInfinity){[double]::PositiveInfinity}else{[double]$_.externalMilliseconds}});$externalP95=[Deep.Cli.Measurement.DeliveryEventController]::NearestRank($externalValues,.95)
+  $firstExternalValues=[double[]]@($cohort|ForEach-Object {if($_.outcome -ceq 'Success' -and -not $_.recovery -and -not $_.externalPositiveInfinity){[double]$_.externalMilliseconds}else{[double]::PositiveInfinity}});$firstExternalP95=[Deep.Cli.Measurement.DeliveryEventController]::NearestRank($firstExternalValues,.95)
+  [pscustomobject]@{observedExternalIncludesRecovery=$true;observedExternalIncludesDeadlineOverruns=$true;firstAttemptExternalP95Milliseconds=$(if([double]::IsFinite($firstExternalP95)){$firstExternalP95}else{$null});firstAttemptExternalPositiveInfinity=[double]::IsPositiveInfinity($firstExternalP95);observedExternalFinite=@($cohort|Where-Object {-not $_.externalPositiveInfinity}).Count;observedExternalOverallP95Milliseconds=$(if([double]::IsFinite($externalP95)){$externalP95}else{$null});observedExternalOverallPositiveInfinity=[double]::IsPositiveInfinity($externalP95);kind=$kind;n=$cohort.Count;rank=[int][Math]::Ceiling(.95*$cohort.Count);submitted=@($cohort|Where-Object submitted).Count;admitted=@($cohort|Where-Object admitted).Count;notSubmitted=@($cohort|Where-Object {-not $_.submitted}).Count;deadlines=@($cohort|Where-Object outcome -eq 'Deadline').Count;errors=@($cohort|Where-Object outcome -eq 'FirstAttemptFailure').Count;withRecovery=@($cohort|Where-Object recovery).Count;finite=@($cohort|Where-Object {-not $_.positiveInfinity}).Count;missingOrFailed=@($cohort|Where-Object positiveInfinity).Count;p95Milliseconds=$(if([double]::IsFinite($p95)){$p95}else{$null});positiveInfinity=[double]::IsPositiveInfinity($p95);observedFinite=@($cohort|Where-Object {-not $_.observedPositiveInfinity}).Count;observedMissing=@($cohort|Where-Object observedPositiveInfinity).Count;observedP95Milliseconds=$(if([double]::IsFinite($observedP95)){$observedP95}else{$null});observedPositiveInfinity=[double]::IsPositiveInfinity($observedP95);observedIncludesRecovery=$true}
  })
- $pairsStats=@(foreach($kind in @('Direct','Group')){foreach($sender in 1..3){foreach($recipient in 1..3|Where-Object {$_ -ne $sender}){
+ $pairsStats=@(foreach($kind in $(if($GroupOnly){@('Group')}else{@('Direct','Group')})){foreach($sender in 1..3){foreach($recipient in 1..3|Where-Object {$_ -ne $sender}){
   $cohort=@($samples|Where-Object {$_.kind -ceq $kind -and -not $_.warmup -and $_.sender -eq $sender -and ($kind -ceq 'Group' -or $_.recipient -eq $recipient)})
   $values=[double[]]@(foreach($sample in $cohort){if($sample.positiveInfinity){[double]::PositiveInfinity}else{[double](@($sample.recipients|Where-Object recipient -eq $recipient)[0].milliseconds)}})
   $p95=[Deep.Cli.Measurement.DeliveryEventController]::NearestRank($values,.95)
@@ -309,6 +339,6 @@ finally{
   [pscustomobject]@{kind=$kind;sender=$sender;recipient=$recipient;n=$cohort.Count;rank=[int][Math]::Ceiling(.95*$cohort.Count);finite=@($values|Where-Object {[double]::IsFinite($_)}).Count;p95Milliseconds=$(if([double]::IsFinite($p95)){$p95}else{$null});positiveInfinity=[double]::IsPositiveInfinity($p95);observedFinite=@($observedValues|Where-Object {[double]::IsFinite($_)}).Count;observedP95Milliseconds=$(if([double]::IsFinite($observedP95)){$observedP95}else{$null});observedPositiveInfinity=[double]::IsPositiveInfinity($observedP95)}
  }}})
  $roleStats=@(foreach($sender in 1..3){$cohort=@($samples|Where-Object {$_.kind -ceq 'Group' -and -not $_.warmup -and $_.sender -eq $sender});$values=[double[]]@($cohort|ForEach-Object {if($_.positiveInfinity){[double]::PositiveInfinity}else{[double]$_.milliseconds}});$p95=[Deep.Cli.Measurement.DeliveryEventController]::NearestRank($values,.95);$observedValues=[double[]]@($cohort|ForEach-Object {if($_.observedPositiveInfinity){[double]::PositiveInfinity}else{[double]$_.observedMilliseconds}});$observedP95=[Deep.Cli.Measurement.DeliveryEventController]::NearestRank($observedValues,.95);[pscustomobject]@{sender=$sender;n=$cohort.Count;rank=[int][Math]::Ceiling(.95*$cohort.Count);finite=@($values|Where-Object {[double]::IsFinite($_)}).Count;p95Milliseconds=$(if([double]::IsFinite($p95)){$p95}else{$null});positiveInfinity=[double]::IsPositiveInfinity($p95);observedFinite=@($observedValues|Where-Object {[double]::IsFinite($_)}).Count;observedP95Milliseconds=$(if([double]::IsFinite($observedP95)){$observedP95}else{$null});observedPositiveInfinity=[double]::IsPositiveInfinity($observedP95)}})
- [ordered]@{schema='deep.cli.retained-balanced-delivery.v1';startedUtc=$started;finishedUtc=[DateTime]::UtcNow;setup=$setup;terminalPhase=$phase;safetyStopped=$script:safety;cohortIntegrity=$integrity;inputsUnchanged=$unchanged;cleanClosure=$closed;controllerRejected=$controller.Rejected;idleSeconds=$IdleSeconds;backgroundGenerationProof=$generationProof.ToArray();lastCompleteGenerationProof=$lastCompleteGenerationProof;deliveryRouteVerification=$routeVerification.ToArray();deliveryRoutesAllVerified=($routeVerification.Count -eq 6 -and @($routeVerification|Where-Object {-not $_.verified}).Count -eq 0);backgroundLifecycleAllCurrent=($generationProof.Count -eq 6 -and @($generationProof|Where-Object {-not $_.current}).Count -eq 0);backgroundAdoptionAllSix=($generationProof.Count -eq 6 -and @($generationProof|Where-Object {-not $_.adopted}).Count -eq 0);externalStopRequested=$script:stopRequested;maintenance=$controller.MaintenanceSummary();initial=$initial.ToArray();final=$final.ToArray();statistics=$stats;perDirectedPair=$pairsStats;perGroupSender=$roleStats;samples=$samples;streams=$controller.StreamSummary();releaseQualified=$false;warmLatencyQualified=$false}|ConvertTo-Json -Depth 12|Set-Content -LiteralPath (Join-Path $run 'receipt.json') -Encoding utf8
+ [ordered]@{schema='deep.cli.retained-balanced-delivery.v1';startedUtc=$started;finishedUtc=[DateTime]::UtcNow;setup=$setup;terminalPhase=$phase;safetyStopped=$script:safety;cohortIntegrity=$integrity;inputsUnchanged=$unchanged;cleanClosure=$closed;controllerRejected=$controller.Rejected;firstRejectionCode=$controller.FirstRejectionCode;externalTimerConservativeUpperBound=$true;externalTimerDefinition="Monotonic Stopwatch before first queue submission through exact ordinary plaintext read validation";idleSeconds=$IdleSeconds;warmupCount=$WarmupCount;processesReopened=$true;backgroundGenerationProof=$generationProof.ToArray();lastCompleteGenerationProof=$lastCompleteGenerationProof;deliveryRouteVerification=$routeVerification.ToArray();deliveryRoutesAllVerified=($routeVerification.Count -eq 6 -and @($routeVerification|Where-Object {-not $_.verified}).Count -eq 0);backgroundLifecycleAllCurrent=($generationProof.Count -eq 6 -and @($generationProof|Where-Object {-not $_.current}).Count -eq 0);backgroundAdoptionAllSix=($generationProof.Count -eq 6 -and @($generationProof|Where-Object {-not $_.adopted}).Count -eq 0);externalStopRequested=$script:stopRequested;maintenance=$controller.MaintenanceSummary();initial=$initial.ToArray();final=$final.ToArray();statistics=$stats;perDirectedPair=$pairsStats;perGroupSender=$roleStats;samples=$samples;streams=$controller.StreamSummary();releaseQualified=$false;warmLatencyQualified=$false}|ConvertTo-Json -Depth 12|Set-Content -LiteralPath (Join-Path $run 'receipt.json') -Encoding utf8
  SaveProgress
 }

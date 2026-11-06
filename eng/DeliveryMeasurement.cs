@@ -23,6 +23,8 @@ public sealed class DeliveryEventController
     private readonly Dictionary<(int Sender, long Command, int Recipient), long> historyReads = new();
     private readonly Dictionary<(int Sender, long Admission), long> dispatches = new();
     private bool rejected;
+    private string? firstRejectionCode;
+    public string FirstRejectionCode { get { lock (gate) return firstRejectionCode ?? (rejected ? "NonFrameRejection" : "None"); } }
     public bool Rejected { get { lock (gate) return rejected; } }
     public int MaximumEvents => maximumEvents;
     public bool HasCommandAdmission(int client, long command)
@@ -207,6 +209,7 @@ public sealed class DeliveryEventController
             // Timestamp before parsing. No source-process/wall-clock timestamps
             // or response completion times participate in the measured path.
             var timestamp = clock();
+            var closedPhase = "Unknown";
             try
             {
                 if (!streams.TryGetValue(client, out var stream) || frame.Length > 32768)
@@ -221,7 +224,7 @@ public sealed class DeliveryEventController
                         throw new InvalidDataException();
                 if (root.GetProperty("schema").GetString() == "deep.maintenance.v1")
                 {
-                    ObserveMaintenance(stream, root, names); return;
+                    closedPhase = "Maintenance"; ObserveMaintenance(stream, root, names); return;
                 }
                 if (frame.Length > 512 || names.Any(name => name is not ("schema" or "sequence" or "command" or "phase" or "messageHash" or "deliveryHash" or "dropped")))
                     throw new InvalidDataException();
@@ -229,6 +232,7 @@ public sealed class DeliveryEventController
                 var sequence = root.GetProperty("sequence").GetInt64();
                 var command = root.GetProperty("command").GetInt64();
                 var phase = root.GetProperty("phase").GetString();
+                if (phase is "CommandAccepted" or "NativeOutboxDurable" or "StoreQuorum" or "RecipientDurableReadable" or "StreamClosed") closedPhase = phase;
                 var message = root.GetProperty("messageHash").GetString();
                 var delivery = root.GetProperty("deliveryHash").GetString();
                 if (phase == "StreamClosed")
@@ -270,7 +274,7 @@ public sealed class DeliveryEventController
                 rows.Add(new Row(client, command, phase!, message!, delivery!, timestamp));
             }
             catch (Exception error) when (error is JsonException or InvalidDataException or InvalidOperationException or FormatException or OverflowException or KeyNotFoundException)
-            { rejected = true; }
+            { firstRejectionCode ??= "Frame." + closedPhase + "." + error.GetType().Name; rejected = true; }
         }
     }
 
@@ -339,7 +343,7 @@ public sealed class DeliveryEventController
         if (method is null || method.Length > 240 || il is < -1 or > 1048575 ||
             method != "Unavailable" && !System.Text.RegularExpressions.Regex.IsMatch(method, @"\ADeep\.(?:Client\.Shared|Protocol)\.[A-Za-z0-9_.+<>`]+\z")) throw new InvalidDataException();
     }
-    private static JsonElement ValidateMaintenanceFailure(JsonElement failure)
+    private static object ValidateMaintenanceFailure(JsonElement failure)
     {
         ClosedNames(failure, "phase", "causes");
         if (failure.GetProperty("phase").GetString() != "ContactMaintenance") throw new InvalidDataException();
@@ -354,7 +358,7 @@ public sealed class DeliveryEventController
             if (trail.ValueKind != JsonValueKind.Array || trail.GetArrayLength() > 8) throw new InvalidDataException();
             foreach (var frame in trail.EnumerateArray()) { ClosedNames(frame, "method", "il"); MaintenanceLocation(frame); }
         }
-        return failure.Clone();
+        return new { phase = failure.GetProperty("phase").GetString(), causes = causes.EnumerateArray().Select(cause => new { category = cause.GetProperty("category").GetString(), check = cause.GetProperty("check").GetString(), method = cause.GetProperty("method").GetString(), il = cause.GetProperty("il").GetInt64(), trail = cause.GetProperty("trail").EnumerateArray().Select(frame => new { method = frame.GetProperty("method").GetString(), il = frame.GetProperty("il").GetInt64() }).ToArray() }).ToArray() };
     }
 
     public object MaintenanceSummary()
@@ -455,7 +459,7 @@ public sealed class DeliveryEventController
         internal bool MaintenanceActive;
         internal long[] LastMaintenanceCounts = new long[5];
         internal bool LastMaintenanceHasMore;
-        internal JsonElement? LastMaintenanceFailure;
+        internal object? LastMaintenanceFailure;
         internal long? ReportedDropped, ReportedSequence;
         internal bool Closed, Eof, TerminalSeen;
         internal readonly HashSet<string> Seen = new(StringComparer.Ordinal);
