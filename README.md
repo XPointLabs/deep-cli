@@ -492,9 +492,19 @@ opening their native scopes, while direct recent pushes its bound into SQL.
 
 `eng/Measure-RetainedBalancedDelivery.ps1` measures the retained three clients
 without creating contacts or resetting profiles. Private `network connect`
-frames seed actual known descriptors and enable idle maintenance. Readiness
-requires signed XUR1 successors adopted in all six directions and current
-DMC2/14 delivery routes. The default engineering population is 24 direct and
+frames seed actual known descriptors and enable idle maintenance. A bounded
+observation records signed XUR1 adoption and current intervals separately from
+the six strict DMC2/14 delivery-route checks. A failed lifecycle criterion remains
+failed while independently admitted delivery can be measured. The default engineering population is 24 direct and
 24 group messages (nearest-rank p95 is observation23); group latency ends when
 both recipients return the exact plaintext from ordinary history. Report
 observed-read coverage separately from failures, recovery and post-read ACK.
+
+Idle maintenance fairly prioritizes contacts with protected known descriptors
+(three known turns followed by one unknown turn). Verified control/page progress
+permits the next idle opportunity after10s; no-progress or failed cycles retain
+the60s pause. Exact `deep.maintenance.v1` frames contain11 fields, including
+processed page counts and the existing bounded failure diagnostic. Detailed
+`contact route-health` reports authenticated own/peer generation and expiry
+diagnostics; the scheduler uses the cheaper ordinary health path. A run-local
+`stop.request` stops new work between commands and drains admitted originals.

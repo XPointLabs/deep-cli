@@ -11,7 +11,7 @@ public sealed class DeliveryMeasurementTests
     private static string End(long sequence, long dropped = 0) => JsonSerializer.Serialize(new
         { schema = "deep.delivery.v1", sequence, command = 0, phase = "StreamClosed", messageHash = "", deliveryHash = "", dropped });
     private static string Maintenance(long sequence, long cycle, string phase, int acceptedContacts = 0, int controlsStored = 0) =>
-        JsonSerializer.Serialize(new { schema = "deep.maintenance.v1", sequence, cycle, phase, acceptedContacts, controlsStored, deferredContacts = 0, reintroductions = 0 });
+        JsonSerializer.Serialize(new { schema = "deep.maintenance.v1", sequence, cycle, phase, acceptedContacts, controlsStored, deferredContacts = 0, reintroductions = 0, processedEnvelopes = 0, hasMore = false, failure = (object?)null });
     private static Task Register(DeliveryEventController controller, params int[] roles)
     { foreach (var role in roles) controller.Register(role); return Task.CompletedTask; }
     private static void Close(DeliveryEventController controller, int role, long sequence)
@@ -212,6 +212,57 @@ public sealed class DeliveryMeasurementTests
         controller.CompleteCommand(1, 1, 0);
         Close(controller, 1, 2);
         Assert.False(controller.Rejected);
+    }
+
+    [Fact]
+    public async Task MaintenanceFailureRetainsOnlyValidatedClosedCauseAndNativeTrail()
+    {
+        var controller = new DeliveryEventController();
+        await Register(controller, 1);
+        controller.ObserveFrame(1, Maintenance(1, 1, "Started"));
+        var failure = new { phase = "ContactMaintenance", causes = new[] { new { category = "ProtocolRejected", check = "HistoryAnnouncementExpiredAnnouncement", method = "Deep.Client.Shared.Services.Example", il = 12, trail = new[] { new { method = "Unavailable", il = -1 } } } } };
+        controller.ObserveFrame(1, JsonSerializer.Serialize(new { schema = "deep.maintenance.v1", sequence = 2, cycle = 1, phase = "Failed", acceptedContacts = 0, controlsStored = 0, deferredContacts = 0, reintroductions = 0, processedEnvelopes = 0, hasMore = false, failure }));
+        using var summary = JsonDocument.Parse(JsonSerializer.Serialize(controller.MaintenanceSummary()));
+        Assert.Equal("ProtocolRejected", summary.RootElement[0].GetProperty("lastFailure").GetProperty("causes")[0].GetProperty("category").GetString());
+        Close(controller, 1, 1);
+        Assert.False(controller.Rejected);
+    }
+
+    [Fact]
+    public async Task ActualOwnedProtocolFailureRoundTripsThroughProductionMapperAndController()
+    {
+        const string privateText = "DO-NOT-EXPORT-private-address-path";
+        Exception? actual = null;
+        try { Deep.Protocol.Identity.DeepPermanentIdV2.ParseCanonical(privateText); }
+        catch (Exception error) { actual = error; }
+        Assert.NotNull(actual);
+        using var output = new StringWriter();
+        await using (var diagnostics = new DeliveryDiagnostics(output))
+        {
+            diagnostics.ObserveMaintenance(1, "Started");
+            diagnostics.ObserveMaintenance(1, "Failed", failure: new IOException(privateText, actual));
+        }
+        Assert.DoesNotContain(privateText, output.ToString());
+        var controller = new DeliveryEventController();
+        await controller.Attach(1, new StringReader(output.ToString()));
+        Assert.False(controller.Rejected);
+        using var summary = JsonDocument.Parse(JsonSerializer.Serialize(controller.MaintenanceSummary()));
+        var causes = summary.RootElement[0].GetProperty("lastFailure").GetProperty("causes");
+        Assert.Contains(causes.EnumerateArray(), cause => cause.GetProperty("method").GetString()!.StartsWith("Deep.Protocol.", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("UntrustedCategory", "Unclassified", "Unavailable")]
+    [InlineData("Other", "UntrustedCheck", "Unavailable")]
+    [InlineData("Other", "Unclassified", "private-path-or-payload")]
+    public async Task UnclosedMaintenanceFailureStringsRejectStream(string category, string check, string method)
+    {
+        var controller = new DeliveryEventController();
+        await Register(controller, 1);
+        controller.ObserveFrame(1, Maintenance(1, 1, "Started"));
+        var failure = new { phase = "ContactMaintenance", causes = new[] { new { category, check, method, il = -1, trail = Array.Empty<object>() } } };
+        controller.ObserveFrame(1, JsonSerializer.Serialize(new { schema = "deep.maintenance.v1", sequence = 2, cycle = 1, phase = "Failed", acceptedContacts = 0, controlsStored = 0, deferredContacts = 0, reintroductions = 0, processedEnvelopes = 0, hasMore = false, failure }));
+        Assert.True(controller.Rejected);
     }
 
     [Theory]

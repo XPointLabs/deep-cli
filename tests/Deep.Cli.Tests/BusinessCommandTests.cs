@@ -152,8 +152,16 @@ public sealed class BusinessCommandTests
             "--conversation", Conversation, "--route", "caller-authored-route"]));
         var health = new Deep.Client.Shared.Services.DeepIdV2ContactRouteHealth(false, false, true);
         using var json = JsonDocument.Parse(JsonSerializer.Serialize(health));
-        Assert.Equal(3, json.RootElement.EnumerateObject().Count());
-        Assert.All(json.RootElement.EnumerateObject(), property => Assert.True(property.Value.ValueKind is JsonValueKind.False or JsonValueKind.True));
+        Assert.Equal(new[] { "AdvertisementIntervalCoversNow", "UpdateIntervalCoversNow", "RouteFaultRetained",
+            "UpdateGeneration", "UpdateIssuedAtUnixSeconds", "UpdateExpiresAtUnixSeconds", "UpdateRemainingSeconds",
+            "OwnUpdateGeneration", "OwnAnnouncementUpdateGeneration", "OwnPendingRouteControl" }.Order(StringComparer.Ordinal),
+            json.RootElement.EnumerateObject().Select(property => property.Name).Order(StringComparer.Ordinal));
+        Assert.False(json.RootElement.GetProperty("AdvertisementIntervalCoversNow").GetBoolean());
+        Assert.False(json.RootElement.GetProperty("UpdateIntervalCoversNow").GetBoolean());
+        Assert.True(json.RootElement.GetProperty("RouteFaultRetained").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, json.RootElement.GetProperty("OwnUpdateGeneration").ValueKind);
+        Assert.Equal(JsonValueKind.Null, json.RootElement.GetProperty("OwnAnnouncementUpdateGeneration").ValueKind);
+        Assert.Equal(JsonValueKind.Null, json.RootElement.GetProperty("OwnPendingRouteControl").ValueKind);
     }
 
     [Theory]

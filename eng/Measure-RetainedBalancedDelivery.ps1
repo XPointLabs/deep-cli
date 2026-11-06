@@ -9,11 +9,13 @@ param(
  [ValidateRange(1000,330000)][int]$SampleBudgetMilliseconds=120000,
  [ValidateRange(0,2)][int]$RecoveryAttempts=1,
  [ValidateRange(0,900)][int]$IdleSeconds=180,
- [ValidateRange(60,1800)][int]$ReadinessBudgetSeconds=1800
+ [ValidateRange(60,1800)][int]$ReadinessBudgetSeconds=300,
+ [string]$StopMarkerPath
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 $repo=Split-Path $PSScriptRoot -Parent
+$engineering=$PSScriptRoot
 $root=[IO.Path]::GetFullPath((Join-Path $repo 'artifacts'))+[IO.Path]::DirectorySeparatorChar
 $exe=[IO.Path]::GetFullPath($ExecutablePath);$run=[IO.Path]::GetFullPath($RunDirectory)
 if(-not $run.StartsWith($root,[StringComparison]::OrdinalIgnoreCase) -or (Test-Path -LiteralPath $run) -or
@@ -25,7 +27,7 @@ $profiles=@('cli-latency-a2','cli-gsr4-bob','cli-latency-c')
 $network=(Get-Content -LiteralPath (Join-Path $BootstrapDirectory 'deep-dev.json') -Raw|ConvertFrom-Json).networkIdHex.ToLowerInvariant()
 if($network -cnotmatch '^[0-9a-f]{32}$'){throw 'Exact public network required.'}
 $net=@('--bootstrap',$BootstrapDirectory,'--registry',$RegistryOrigin)
-$inputs=@($PSCommandPath,(Join-Path $PSScriptRoot 'CliSession.psm1'),(Join-Path $PSScriptRoot 'DeliveryMeasurement.cs'),(Join-Path $PSScriptRoot 'GsrCohort.psm1'))
+$inputs=@($PSCommandPath,(Join-Path $engineering 'CliSession.psm1'),(Join-Path $engineering 'DeliveryMeasurement.cs'),(Join-Path $engineering 'GsrCohort.psm1'))
 $sourceHashes=@($inputs|ForEach-Object {(Get-FileHash -LiteralPath $_).Hash})
 $runtimeRoot=[IO.Path]::GetDirectoryName($exe)
 $runtimeFiles=@(Get-ChildItem -LiteralPath $runtimeRoot -File -Recurse|Sort-Object FullName)
@@ -36,8 +38,8 @@ function Inputs {for($i=0;$i -lt $inputs.Count;$i++){if((Get-FileHash -LiteralPa
  for($i=0;$i -lt $runtimeFiles.Count;$i++){if((Get-FileHash -LiteralPath $runtimeFiles[$i].FullName).Hash -cne $runtimeHashes[$i]){throw 'Frozen runtime changed.'}}}
 [void][IO.Directory]::CreateDirectory($run)
 foreach($path in $inputs){Copy-Item -LiteralPath $path -Destination $run}
-Import-Module (Join-Path $PSScriptRoot 'CliSession.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'GsrCohort.psm1') -Force
+Import-Module (Join-Path $engineering 'CliSession.psm1') -Force
+Import-Module (Join-Path $engineering 'GsrCohort.psm1') -Force
 # The denominator and original asymmetric cursors exist before opening a host.
 # B64 is retained. No balancing message or replacement command is authored.
 $population=[Collections.Generic.List[object]]::new()
@@ -51,12 +53,17 @@ foreach($kind in @('Direct','Group')){
 $population.ToArray()|ConvertTo-Json -Depth 4|Set-Content -LiteralPath (Join-Path $run 'population.json') -Encoding utf8
 [ordered]@{schema='deep.cli.balanced-plan.v1';directMeasured=6*$DirectRounds;groupMeasured=3*$GroupRounds;warmup=9;startHistory=190;startLocal=@(63,64,63);firstAttemptOnly=$true;sampleBudgetMilliseconds=$SampleBudgetMilliseconds;recoveryAttempts=$RecoveryAttempts;idleSeconds=$IdleSeconds;readinessBudgetSeconds=$ReadinessBudgetSeconds;releaseQualified=$false;sourceHashes=$sourceHashes;runtimeHashes=$runtimeHashes}|ConvertTo-Json -Depth 4|Set-Content -LiteralPath (Join-Path $run 'plan.json') -Encoding utf8
 $controller=New-DeliveryEventController -MaximumEvents 100000
-$sessions=@{};$contacts=@{};$addresses=@{};$books=@{};$pairs=@{};$pending=@{};$blocked=@{};$group=$null;$beforeGenerations=@{};$generationProof=[Collections.Generic.List[object]]::new()
+$sessions=@{};$contacts=@{};$addresses=@{};$books=@{};$pairs=@{};$pending=@{};$blocked=@{};$group=$null;$beforeGenerations=@{};$routeVerification=[Collections.Generic.List[object]]::new();$lastCompleteGenerationProof=@();$generationProof=[Collections.Generic.List[object]]::new()
 $steps=[Collections.Generic.List[object]]::new();$initial=[Collections.Generic.List[object]]::new();$final=[Collections.Generic.List[object]]::new();$originals=[Collections.Generic.List[object]]::new()
+$script:stopRequested=$false;$script:sampleInFlight=$false;$script:cleanup=$false;
+$stopMarker=if([string]::IsNullOrEmpty($StopMarkerPath)){Join-Path $run 'stop.request'}else{[IO.Path]::GetFullPath($StopMarkerPath)}
+if(-not $stopMarker.StartsWith($run+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw 'Stop marker must stay in the owned run directory.'}
+function Stop-Requested {if(Test-Path -LiteralPath $stopMarker){$script:stopRequested=$true};return $script:stopRequested}
 $script:safety=$false;$setup=$false;$closed=$true;$unchanged=$true;$integrity=$true;$phase='setup';$started=[DateTime]::UtcNow
 function Require([bool]$ok){if(-not $ok){throw 'Closed scenario assertion rejected.'}}
 function Pair([int]$a,[int]$b){(@($a,$b)|Sort-Object)-join ':'}
-function Start([int]$role,[string]$stage,[string[]]$arguments){
+function Start-OwnedCommand([int]$role,[string]$stage,[string[]]$arguments){
+ if(-not $script:sampleInFlight -and -not $script:cleanup -and (Stop-Requested)){throw 'External stop requested between commands.'}
  if($pending.ContainsKey($role) -or $blocked.ContainsKey('host'+$role)){throw 'Host unavailable or already active.'}
  $h=Start-CliSessionCommand $sessions[$role] ($arguments+@('--profile',$profiles[$role-1],'--network',$network))
  $pending[$role]=[pscustomobject]@{handle=$h;stage=$stage;watch=[Diagnostics.Stopwatch]::StartNew()};$h
@@ -68,7 +75,8 @@ function Finish([int]$role){
  finally{$pending.Remove($role)}
  $row=[ordered]@{role=$role;phase=$p.stage;command=$r.CommandOrdinal;exit=$r.ExitCode;milliseconds=$p.watch.ElapsedMilliseconds;cpuMilliseconds=$r.ProcessorMilliseconds}
  foreach($name in @('recoveryWork','sessionWork','networkWork','nativeStorageWork','processed','tombstones','hasMore','completed','maintenance')){if($r.Result.PSObject.Properties.Name -contains $name){$row[$name]=$r.Result.$name}}
- if($r.Result.PSObject.Properties.Name -contains 'health'){$row['routeHealth']=[pscustomobject]@{AdvertisementIntervalCoversNow=$r.Result.health.AdvertisementIntervalCoversNow;UpdateIntervalCoversNow=$r.Result.health.UpdateIntervalCoversNow;RouteFaultRetained=$r.Result.health.RouteFaultRetained;UpdateGeneration=$(if($r.Result.health.PSObject.Properties.Name -contains 'UpdateGeneration'){$r.Result.health.UpdateGeneration}else{$null})}}
+ if($p.stage -ceq 'known-consent'){$row['contactCounts']=[pscustomobject]@{total=@($r.Result.contacts).Count;accepted=@($r.Result.contacts|Where-Object {$_.state -cin @('PeerAcceptanceRetained','LocalAcceptanceRetained')}).Count}}
+ if($r.Result.PSObject.Properties.Name -contains 'health'){$row['routeHealth']=[pscustomobject]@{AdvertisementIntervalCoversNow=$r.Result.health.AdvertisementIntervalCoversNow;UpdateIntervalCoversNow=$r.Result.health.UpdateIntervalCoversNow;RouteFaultRetained=$r.Result.health.RouteFaultRetained;UpdateGeneration=$(if($r.Result.health.PSObject.Properties.Name -contains 'UpdateGeneration'){$r.Result.health.UpdateGeneration}else{$null});UpdateIssuedAtUnixSeconds=$(if($r.Result.health.PSObject.Properties.Name -contains 'UpdateIssuedAtUnixSeconds'){$r.Result.health.UpdateIssuedAtUnixSeconds}else{$null});UpdateExpiresAtUnixSeconds=$(if($r.Result.health.PSObject.Properties.Name -contains 'UpdateExpiresAtUnixSeconds'){$r.Result.health.UpdateExpiresAtUnixSeconds}else{$null});UpdateRemainingSeconds=$(if($r.Result.health.PSObject.Properties.Name -contains 'UpdateRemainingSeconds'){$r.Result.health.UpdateRemainingSeconds}else{$null});OwnUpdateGeneration=$(if($r.Result.health.PSObject.Properties.Name -contains 'OwnUpdateGeneration'){$r.Result.health.OwnUpdateGeneration}else{$null});OwnAnnouncementUpdateGeneration=$(if($r.Result.health.PSObject.Properties.Name -contains 'OwnAnnouncementUpdateGeneration'){$r.Result.health.OwnAnnouncementUpdateGeneration}else{$null});OwnPendingRouteControl=$(if($r.Result.health.PSObject.Properties.Name -contains 'OwnPendingRouteControl'){$r.Result.health.OwnPendingRouteControl}else{$null})}}
  if($r.ExitCode -ne 0){
   $row['code']='Unclassified';if($r.Result.PSObject.Properties.Name -contains 'code' -and $r.Result.code -cin @('business-operation-failed','cancelled','protected-state-rejected','invalid-arguments','storage-unavailable-or-busy','operation-failed')){$row.code=$r.Result.code}
   if($row.code -ceq 'protected-state-rejected'){$script:safety=$true}
@@ -79,7 +87,7 @@ function Finish([int]$role){
  [pscustomobject]$row|ConvertTo-Json -Depth 6 -Compress|Add-Content -LiteralPath (Join-Path $run 'steps.jsonl') -Encoding utf8
  return $r
 }
-function Call([int]$role,[string]$stage,[string[]]$arguments){[void](Start $role $stage $arguments);Finish $role}
+function Call([int]$role,[string]$stage,[string[]]$arguments){[void](Start-OwnedCommand $role $stage $arguments);Finish $role}
 function Must([int]$role,[string]$stage,[string[]]$arguments){$r=Call $role $stage $arguments;Require ($r.ExitCode -eq 0);$r.Result}
 function RecoveryWork($result){
  if($result.PSObject.Properties.Name -notcontains 'recoveryWork'){return $false}
@@ -132,17 +140,7 @@ function Census([string]$stage){
 function SaveProgress {
  $population.ToArray()|Select-Object kind,round,warmup,sender,recipient,sequence,submitted,command,dispatch,outcome,recovery,recovered,ack,readWithoutOwnedAckPage,duplicatesChecked,reads,externalReadMilliseconds|ConvertTo-Json -Depth 7|Set-Content -LiteralPath (Join-Path $run 'progress.json') -Encoding utf8
 }
-function Wait-QuietMaintenance([int]$role,[long]$completed){
- while($readiness.Elapsed.TotalSeconds -lt $ReadinessBudgetSeconds){
-  $summary=@($controller.MaintenanceSummary())
-  $summary|ConvertTo-Json -Depth 4|Set-Content -LiteralPath (Join-Path $run 'maintenance-progress.json') -Encoding utf8
-  if($controller.Rejected -or $script:safety){return $false}
-  $state=@($summary|Where-Object role -eq $role)[0]
-  if($state.completed -ge $completed -and -not $state.active -and $readiness.Elapsed.TotalSeconds -ge $IdleSeconds){return $true}
-  Start-Sleep -Seconds 1
- }
- return $false
-}
+
 try{
  Inputs
  foreach($role in 1..3){$sessions[$role]=New-CliSession $exe $profiles[$role-1] $network $BootstrapDirectory $RegistryOrigin -DeliveryController $controller -ControllerRole $role}
@@ -161,47 +159,53 @@ try{
  # The seed-only normal entry point persists the real user-known address book
  # through private stdio. It performs no foreground route-control operation.
  foreach($role in 1..3){$seed=Must $role 'connection-seed-only' (@('network','connect','--known-contacts',$books[$role])+$net);Require ($seed.status -ceq 'connected' -and $seed.networkConnected -eq $true -and $seed.backgroundMaintenanceScheduled -eq $true)}
- # Observe scheduler telemetry in RAM, without preempting the real composite
- # publication/control/receive work. A probe waits for two completed cycles per
- # role, and only submits each diagnostic when that role's cycle is inactive.
- $readiness=[Diagnostics.Stopwatch]::StartNew();$nextCompleted=@{1=2L;2=2L;3=2L};$ready=$false
- while($readiness.Elapsed.TotalSeconds -lt $ReadinessBudgetSeconds){
-  $ready=$true;$generationProof.Clear()
-  foreach($role in 1..3){foreach($peer in 1..3|Where-Object {$_ -ne $role}){
-   if(-not (Wait-QuietMaintenance $role $nextCompleted[$role])){$ready=$false;break}
-   $r=Call $role 'background-readiness-health' (@('contact','route-health','--conversation',$pairs[(Pair $role $peer)])+$net)
-   $current=$false;$after=$null
-   if($r.ExitCode -eq 0){$h=$r.Result.health;$after=$(if($h.PSObject.Properties.Name -contains 'UpdateGeneration'){$h.UpdateGeneration}else{$null});$current=$h.AdvertisementIntervalCoversNow -eq $true -and $h.UpdateIntervalCoversNow -eq $true -and $h.RouteFaultRetained -eq $false -and $null -ne $after -and $after -ge 1}
-   if(-not $current){$ready=$false}
-   $before=$beforeGenerations[($role.ToString()+':'+$peer)];$generationProof.Add([pscustomobject]@{role=$role;peer=$peer;before=$before;after=$after;advanced=($null -ne $before -and $null -ne $after -and $after -gt $before);current=$current})
-  }}
-  if($ready -or $script:safety){break}
-  foreach($state in @($controller.MaintenanceSummary())){$nextCompleted[$state.role]=[long]$state.completed+2L}
+ # Observe natural scheduler work for the configured bounded interval. The
+ # following ordinary health/route probes may preempt background maintenance;
+ # lifecycle verdicts remain separate from actual strict delivery authority.
+ $readiness=[Diagnostics.Stopwatch]::StartNew();$routeVerification=[Collections.Generic.List[object]]::new()
+ while($readiness.Elapsed.TotalSeconds -lt $ReadinessBudgetSeconds -and -not (Stop-Requested)){
+  $controller.MaintenanceSummary()|ConvertTo-Json -Depth 8|Set-Content -LiteralPath (Join-Path $run 'maintenance-progress.json') -Encoding utf8
+  Start-Sleep -Seconds 1
  }
- Require ($ready -and -not $script:safety)
- foreach($role in 1..3){foreach($peer in 1..3|Where-Object {$_ -ne $role}){$v=Must $role 'ready-route' (@('contact','route-verify','--conversation',$pairs[(Pair $role $peer)])+$net);Require ($v.routeVerified -eq $true)}}
+ $generationProof.Clear()
+ foreach($role in 1..3){foreach($peer in 1..3|Where-Object {$_ -ne $role}){
+  $r=Call $role 'background-readiness-health' (@('contact','route-health','--conversation',$pairs[(Pair $role $peer)])+$net)
+  $current=$false;$adopted=$false;$after=$null
+  if($r.ExitCode -eq 0){$h=$r.Result.health;$after=$(if($h.PSObject.Properties.Name -contains 'UpdateGeneration'){$h.UpdateGeneration}else{$null});$adopted=$h.RouteFaultRetained -eq $false -and $null -ne $after -and $after -ge 1;$current=$adopted -and $h.UpdateIntervalCoversNow -eq $true}
+  $before=$beforeGenerations[($role.ToString()+':'+$peer)];$generationProof.Add([pscustomobject]@{role=$role;peer=$peer;before=$before;after=$after;advanced=($null -ne $before -and $null -ne $after -and $after -gt $before);current=$current;adopted=$adopted})
+ }}
+ if($generationProof.Count -eq 6){$lastCompleteGenerationProof=@($generationProof.ToArray())}
+ foreach($role in 1..3){foreach($peer in 1..3|Where-Object {$_ -ne $role}){
+  $v=Call $role 'ready-route' (@('contact','route-verify','--conversation',$pairs[(Pair $role $peer)])+$net)
+  $verified=$v.ExitCode -eq 0 -and $v.Result.status -ceq 'ok' -and $v.Result.routeVerified -eq $true
+  $routeVerification.Add([pscustomobject]@{role=$role;peer=$peer;verified=$verified;exit=$v.ExitCode})
+  if(-not $verified){$blocked[('Route:'+$role+':'+$peer)]=$true}
+ }}
+ Require (-not $script:safety -and -not $script:stopRequested)
  $setup=$true
  foreach($sample in $population){
+  $script:sampleInFlight=$false
+  if(Stop-Requested){$sample.outcome='ExternalStopNotSubmitted';continue}
   if($script:safety){$sample.outcome='SafetyNotSubmitted';continue}
   $sender=$sample.sender;$recipients=@(if($sample.kind -ceq 'Direct'){$sample.recipient}else{1..3|Where-Object {$_ -ne $sender}})
   $conversation=$pairs[(Pair $sender $recipients[0])]
-  $dependencies=@(foreach($peer in $recipients){'Pair:'+(Pair $sender $peer)})
+  $dependencies=@(foreach($peer in $recipients){'Pair:'+(Pair $sender $peer);'Route:'+$sender+':'+$peer})
   if($sample.kind -ceq 'Group'){$dependencies+=@('Group:'+$sender)}
   if(@($dependencies|Where-Object {$blocked.ContainsKey($_)}).Count -gt 0 -or @(@($sender)+$recipients|Where-Object {$blocked.ContainsKey('host'+$_)}).Count){$sample.outcome='DependencyNotSubmitted';continue}
-  Inputs;$phase='sample';$text='Balanced delivery '+[Guid]::NewGuid().ToString('N');$operation=$null;$bad=$false;$sendComplete=$false
+  Inputs;$phase='sample';$script:sampleInFlight=$true;$text='Balanced delivery '+[Guid]::NewGuid().ToString('N');$operation=$null;$bad=$false;$sendComplete=$false
   if($sample.kind -ceq 'Group'){$originals.Add([pscustomobject]@{sender=$sender;sequence=$sample.sequence;text=$text})} # RAM only.
   $watch=[Diagnostics.Stopwatch]::StartNew();$states=@{}
   try{
    $sample.submitted=$true;$sample.outcome='Incomplete'
    if($sample.kind -ceq 'Direct'){
-    $h=Start $sender 'queue' (@('message','queue','--conversation',$conversation,'--text',$text)+$net);$sample.command=$h.CommandOrdinal
+    $h=Start-OwnedCommand $sender 'queue' (@('message','queue','--conversation',$conversation,'--text',$text)+$net);$sample.command=$h.CommandOrdinal
     $queued=Finish $sender
     if($queued.ExitCode -ne 0){throw 'Original queue failed.'}
     $sample.recovery=RecoveryWork $queued.Result;$operation=$queued.Result.operation;Require ($operation -cmatch '^[0-9a-f]{64}$')
-    $h=Start $sender 'send' (@('message','send','--conversation',$conversation,'--operation',$operation,'--text',$text)+$net);$sample.dispatch=$h.CommandOrdinal
+    $h=Start-OwnedCommand $sender 'send' (@('message','send','--conversation',$conversation,'--operation',$operation,'--text',$text)+$net);$sample.dispatch=$h.CommandOrdinal
     $controller.BindDirectDispatch($sender,$sample.command,$sample.dispatch)
-   }else{$h=Start $sender 'send' (@('group','send','--group',$group,'--conversation',$conversation,'--text',$text)+$net);$sample.command=$h.CommandOrdinal;$sample.dispatch=$h.CommandOrdinal}
-   foreach($role in $recipients){$states[$role]=[pscustomobject]@{phase='receive';page=0;read=$false;ack=$false;checked=$false;requests=0};[void](Start $role 'receive' (@('mailbox','receive')+$net))}
+   }else{$h=Start-OwnedCommand $sender 'send' (@('group','send','--group',$group,'--conversation',$conversation,'--text',$text)+$net);$sample.command=$h.CommandOrdinal;$sample.dispatch=$h.CommandOrdinal}
+   foreach($role in $recipients){$states[$role]=[pscustomobject]@{phase='receive';page=0;read=$false;ack=$false;checked=$false;requests=0};[void](Start-OwnedCommand $role 'receive' (@('mailbox','receive')+$net))}
    # The receive/read deadline is distinct from the bounded post-read ACK.
    # Finishing ACK after t1 must not inflate the admission-to-history sample.
    while($watch.ElapsedMilliseconds -lt ($SampleBudgetMilliseconds+330000)){
@@ -231,7 +235,7 @@ try{
     foreach($role in $recipients){if(-not $pending.ContainsKey($role)){
      $state=$states[$role];if($state.phase -ceq 'done'){continue};Require ($state.requests -le 32)
      $args=if($state.phase -ceq 'receive'){@('mailbox','receive')+$net}elseif($state.phase -ceq 'ack'){@('mailbox','sync')+$net}else{Recent $sample $role $conversation}
-     [void](Start $role $state.phase $args)
+     [void](Start-OwnedCommand $role $state.phase $args)
     }}
     if($sendComplete -and @($recipients|Where-Object {-not $states[$_].checked}).Count -eq 0){$sample.outcome='Success';$sample.ack=$true;$sample.duplicatesChecked=$true;break}
     Start-Sleep -Milliseconds 25
@@ -266,11 +270,23 @@ try{
   SaveProgress
   Write-Host ([pscustomobject]@{kind=$sample.kind;round=$sample.round;sender=$sender;recipient=$sample.recipient;warmup=$sample.warmup;outcome=$sample.outcome;recovery=$sample.recovery;recovered=$sample.recovered}|ConvertTo-Json -Compress)
  }
- Census 'final'
-}catch{$phase='SetupOrSafetyFailure';$integrity=$false}
+ $script:sampleInFlight=$false;$script:cleanup=$true;Census 'final'
+}catch{
+ $phase=$(if($script:stopRequested){'ExternalStop'}else{'SetupOrSafetyFailure'});$integrity=$false
+ [pscustomobject]@{schema='deep.cli.closed-harness-error.v1';exceptionType=$_.Exception.GetType().FullName;sourceLine=$_.InvocationInfo.ScriptLineNumber;position=$_.InvocationInfo.OffsetInLine}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $run 'harness-error.json') -Encoding utf8
+}
 finally{
  foreach($role in @($pending.Keys)){try{[void](Finish $role)}catch{$closed=$false}}
- foreach($s in $sessions.Values){try{Close-CliSession $s}catch{$closed=$false}}
+ foreach($role in @($sessions.Keys)){
+  $s=$sessions[$role]
+  try{
+   if($script:stopRequested){
+    while(-not $s.Process.HasExited -and @($controller.MaintenanceSummary()|Where-Object {$_.role -eq $role -and $_.active}).Count -gt 0){Start-Sleep -Seconds 1}
+    if(-not $s.Process.HasExited){$s.Process.StandardInput.Close();while(-not $s.Process.WaitForExit(1000)){ }}
+   }
+   Close-CliSession $s
+  }catch{$closed=$false}
+ }
  try{Inputs}catch{$unchanged=$false}
  $samples=@(foreach($sample in $population){
   $recipients=[int[]]@(if($sample.kind -ceq 'Direct'){$sample.recipient}else{1..3|Where-Object {$_ -ne $sample.sender}})
@@ -293,6 +309,6 @@ finally{
   [pscustomobject]@{kind=$kind;sender=$sender;recipient=$recipient;n=$cohort.Count;rank=[int][Math]::Ceiling(.95*$cohort.Count);finite=@($values|Where-Object {[double]::IsFinite($_)}).Count;p95Milliseconds=$(if([double]::IsFinite($p95)){$p95}else{$null});positiveInfinity=[double]::IsPositiveInfinity($p95);observedFinite=@($observedValues|Where-Object {[double]::IsFinite($_)}).Count;observedP95Milliseconds=$(if([double]::IsFinite($observedP95)){$observedP95}else{$null});observedPositiveInfinity=[double]::IsPositiveInfinity($observedP95)}
  }}})
  $roleStats=@(foreach($sender in 1..3){$cohort=@($samples|Where-Object {$_.kind -ceq 'Group' -and -not $_.warmup -and $_.sender -eq $sender});$values=[double[]]@($cohort|ForEach-Object {if($_.positiveInfinity){[double]::PositiveInfinity}else{[double]$_.milliseconds}});$p95=[Deep.Cli.Measurement.DeliveryEventController]::NearestRank($values,.95);$observedValues=[double[]]@($cohort|ForEach-Object {if($_.observedPositiveInfinity){[double]::PositiveInfinity}else{[double]$_.observedMilliseconds}});$observedP95=[Deep.Cli.Measurement.DeliveryEventController]::NearestRank($observedValues,.95);[pscustomobject]@{sender=$sender;n=$cohort.Count;rank=[int][Math]::Ceiling(.95*$cohort.Count);finite=@($values|Where-Object {[double]::IsFinite($_)}).Count;p95Milliseconds=$(if([double]::IsFinite($p95)){$p95}else{$null});positiveInfinity=[double]::IsPositiveInfinity($p95);observedFinite=@($observedValues|Where-Object {[double]::IsFinite($_)}).Count;observedP95Milliseconds=$(if([double]::IsFinite($observedP95)){$observedP95}else{$null});observedPositiveInfinity=[double]::IsPositiveInfinity($observedP95)}})
- [ordered]@{schema='deep.cli.retained-balanced-delivery.v1';startedUtc=$started;finishedUtc=[DateTime]::UtcNow;setup=$setup;terminalPhase=$phase;safetyStopped=$script:safety;cohortIntegrity=$integrity;inputsUnchanged=$unchanged;cleanClosure=$closed;controllerRejected=$controller.Rejected;idleSeconds=$IdleSeconds;backgroundGenerationProof=$generationProof.ToArray();maintenance=$controller.MaintenanceSummary();initial=$initial.ToArray();final=$final.ToArray();statistics=$stats;perDirectedPair=$pairsStats;perGroupSender=$roleStats;samples=$samples;streams=$controller.StreamSummary();releaseQualified=$false;warmLatencyQualified=$false}|ConvertTo-Json -Depth 12|Set-Content -LiteralPath (Join-Path $run 'receipt.json') -Encoding utf8
+ [ordered]@{schema='deep.cli.retained-balanced-delivery.v1';startedUtc=$started;finishedUtc=[DateTime]::UtcNow;setup=$setup;terminalPhase=$phase;safetyStopped=$script:safety;cohortIntegrity=$integrity;inputsUnchanged=$unchanged;cleanClosure=$closed;controllerRejected=$controller.Rejected;idleSeconds=$IdleSeconds;backgroundGenerationProof=$generationProof.ToArray();lastCompleteGenerationProof=$lastCompleteGenerationProof;deliveryRouteVerification=$routeVerification.ToArray();deliveryRoutesAllVerified=($routeVerification.Count -eq 6 -and @($routeVerification|Where-Object {-not $_.verified}).Count -eq 0);backgroundLifecycleAllCurrent=($generationProof.Count -eq 6 -and @($generationProof|Where-Object {-not $_.current}).Count -eq 0);backgroundAdoptionAllSix=($generationProof.Count -eq 6 -and @($generationProof|Where-Object {-not $_.adopted}).Count -eq 0);externalStopRequested=$script:stopRequested;maintenance=$controller.MaintenanceSummary();initial=$initial.ToArray();final=$final.ToArray();statistics=$stats;perDirectedPair=$pairsStats;perGroupSender=$roleStats;samples=$samples;streams=$controller.StreamSummary();releaseQualified=$false;warmLatencyQualified=$false}|ConvertTo-Json -Depth 12|Set-Content -LiteralPath (Join-Path $run 'receipt.json') -Encoding utf8
  SaveProgress
 }

@@ -88,6 +88,10 @@ internal sealed class CliSession(CommandLine binding) : IDisposable, IAsyncDispo
         lock (maintenanceSync) foregroundCommands--;
     }
 
+    internal static TimeSpan ContactMaintenancePause(DeepIdV2ContactMaintenanceResult? completed) =>
+        completed is { ControlsStored: > 0 } or { ProcessedEnvelopes: > 0 } or { Reintroductions: > 0 }
+            ? TimeSpan.FromSeconds(10) : TimeSpan.FromSeconds(60);
+
     private async Task MaintainAsync()
     {
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(10));
@@ -102,6 +106,7 @@ internal sealed class CliSession(CommandLine binding) : IDisposable, IAsyncDispo
                 var started = System.Diagnostics.Stopwatch.GetTimestamp();
                 var contactCycle = connectionActivated && contactMaintenanceActivated && started >= nextContactMaintenance;
                 var cycle = contactCycle ? ++maintenanceCycles : 0;
+                DeepIdV2ContactMaintenanceResult? completedCycle = null;
                 if (contactCycle)
                 {
                     nextContactMaintenance = started + 60 * System.Diagnostics.Stopwatch.Frequency;
@@ -124,6 +129,7 @@ internal sealed class CliSession(CommandLine binding) : IDisposable, IAsyncDispo
                             var completed = await connected.MaintainContactsInBackgroundAsync(knownContactsSeeded ? null : binding.KnownContacts,
                                 budget.Token).ConfigureAwait(false);
                             knownContactsSeeded = true;
+                            completedCycle = completed;
                             delivery?.ObserveMaintenance(cycle, "Completed", completed);
                         }
                     }
@@ -132,12 +138,12 @@ internal sealed class CliSession(CommandLine binding) : IDisposable, IAsyncDispo
                 { if (contactCycle) delivery?.ObserveMaintenance(cycle, "Cancelled"); throw; }
                 catch (OperationCanceledException) when (budget.IsCancellationRequested)
                 { if (contactCycle) delivery?.ObserveMaintenance(cycle, "Cancelled"); InvalidateNetwork(); } // Exact durable controls resume on a later opportunity.
-                catch
-                { if (contactCycle) delivery?.ObserveMaintenance(cycle, "Failed"); maintenanceFailures++; InvalidateNetwork(); } // no stale fallback, retry or payload logging
+                catch (Exception error)
+                { if (contactCycle) delivery?.ObserveMaintenance(cycle, "Failed", failure: error); maintenanceFailures++; InvalidateNetwork(); } // no stale fallback or business retry
                 finally
                 {
                     if (contactCycle) nextContactMaintenance = System.Diagnostics.Stopwatch.GetTimestamp() +
-                        60 * System.Diagnostics.Stopwatch.Frequency;
+                        (long)(ContactMaintenancePause(completedCycle).TotalSeconds * System.Diagnostics.Stopwatch.Frequency);
                     maintenanceMilliseconds += (long)System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;
                     EndMaintenance(budget);
                 }

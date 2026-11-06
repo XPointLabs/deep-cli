@@ -180,7 +180,7 @@ public sealed class DeliveryEventController
                     }
                     else if (!oversized)
                     {
-                        if (frame.Length >= 512) { lock (gate) rejected = true; oversized = true; frame.Clear(); }
+                        if (frame.Length >= 32768) { lock (gate) rejected = true; oversized = true; frame.Clear(); }
                         else frame.Append(buffer[i]);
                     }
                 }
@@ -209,10 +209,10 @@ public sealed class DeliveryEventController
             var timestamp = clock();
             try
             {
-                if (!streams.TryGetValue(client, out var stream) || frame.Length > 512)
+                if (!streams.TryGetValue(client, out var stream) || frame.Length > 32768)
                     throw new InvalidDataException();
                 stream.Frames++;
-                using var document = JsonDocument.Parse(frame, new JsonDocumentOptions { MaxDepth = 2 });
+                using var document = JsonDocument.Parse(frame, new JsonDocumentOptions { MaxDepth = 6 });
                 var root = document.RootElement;
                 if (root.ValueKind != JsonValueKind.Object) throw new InvalidDataException();
                 var names = new HashSet<string>(StringComparer.Ordinal);
@@ -223,7 +223,7 @@ public sealed class DeliveryEventController
                 {
                     ObserveMaintenance(stream, root, names); return;
                 }
-                if (names.Any(name => name is not ("schema" or "sequence" or "command" or "phase" or "messageHash" or "deliveryHash" or "dropped")))
+                if (frame.Length > 512 || names.Any(name => name is not ("schema" or "sequence" or "command" or "phase" or "messageHash" or "deliveryHash" or "dropped")))
                     throw new InvalidDataException();
                 if (root.GetProperty("schema").GetString() != "deep.delivery.v1") throw new InvalidDataException();
                 var sequence = root.GetProperty("sequence").GetInt64();
@@ -276,14 +276,18 @@ public sealed class DeliveryEventController
 
     private void ObserveMaintenance(StreamState stream, JsonElement root, HashSet<string> names)
     {
-        if (stream.Closed || names.Count != 8 || names.Any(name => name is not
-            ("schema" or "sequence" or "cycle" or "phase" or "acceptedContacts" or "controlsStored" or "deferredContacts" or "reintroductions")) ||
+        if (stream.Closed || names.Count != 11 || names.Any(name => name is not
+            ("schema" or "sequence" or "cycle" or "phase" or "acceptedContacts" or "controlsStored" or "deferredContacts" or "reintroductions" or "processedEnvelopes" or "hasMore" or "failure")) ||
             ++stream.MaintenanceFrames > maximumEvents) throw new InvalidDataException();
         var sequence = root.GetProperty("sequence").GetInt64();
         var cycle = root.GetProperty("cycle").GetInt64();
         var phase = root.GetProperty("phase").GetString();
-        var counts = new[] { "acceptedContacts", "controlsStored", "deferredContacts", "reintroductions" }
+        var counts = new[] { "acceptedContacts", "controlsStored", "deferredContacts", "reintroductions", "processedEnvelopes" }
             .Select(name => root.GetProperty(name).GetInt64()).ToArray();
+        var hasMore = root.GetProperty("hasMore").GetBoolean();
+        var failure = root.GetProperty("failure");
+        if (phase != "Completed" && (counts.Any(count => count != 0) || hasMore) || phase != "Failed" && failure.ValueKind != JsonValueKind.Null) throw new InvalidDataException();
+        if (phase == "Failed") stream.LastMaintenanceFailure = ValidateMaintenanceFailure(failure);
         if (sequence != stream.MaintenanceSequence + 1 || counts.Any(count => count is < 0 or > 65536)) throw new InvalidDataException();
         if (phase == "Started")
         {
@@ -294,12 +298,63 @@ public sealed class DeliveryEventController
         {
             if (!stream.MaintenanceActive || cycle != stream.MaintenanceCycle || phase is not ("Completed" or "Cancelled" or "Failed")) throw new InvalidDataException();
             if (phase != "Completed" && counts.Any(count => count != 0)) throw new InvalidDataException();
-            if (phase == "Completed") { stream.CompletedMaintenance++; stream.LastMaintenanceCounts = counts; }
+            if (phase == "Completed") { stream.CompletedMaintenance++; stream.LastMaintenanceCounts = counts; stream.LastMaintenanceHasMore = hasMore; }
             else if (phase == "Cancelled") stream.CancelledMaintenance++;
             else stream.FailedMaintenance++;
             stream.MaintenanceActive = false;
         }
         stream.MaintenanceSequence = sequence;
+    }
+
+    private static readonly HashSet<string> MaintenanceCategories = new(StringComparer.Ordinal)
+    { "OutcomeUnknown", "ContactRetryExpired", "Timeout", "ProtectedState", "HttpFailure", "DirectoryRateLimited", "DirectoryUnavailable", "IoFailure", "InvalidState", "Cancelled", "OperationRejected", "ProtocolRejected", "InvalidInput", "Other", "IngressRetryableBeforeForward", "IngressRejectedBeforeForward" };
+    private static readonly HashSet<string> MaintenanceChecks = CreateMaintenanceChecks();
+    private static HashSet<string> CreateMaintenanceChecks()
+    {
+        var result = new HashSet<string>(StringComparer.Ordinal) { "Unclassified", "PreKeysUnavailable" };
+        void Add(string prefix, params string[] suffixes) { foreach (var suffix in suffixes) result.Add(prefix + suffix); }
+        Add("GroupControl", "Expired", "RateLimited", "StaleView", "Conflict", "OutcomeUnknown", "SizeFailure", "RecordTooLarge");
+        Add("RouteContext", "NetworkAuthority", "RecipientNetwork", "ViewAuthority", "HeadAuthority", "DirectoryAuthority", "TimeAuthority", "DirectoryWitnessPolicy", "TimeWitnessPolicy", "DirectoryHead", "ViewHash", "ViewGeneration", "ClockBoot", "ClockRegression", "ObservationExpiry");
+        Add("HistoryAnnouncement", "FutureCreation", "ExpiredAnnouncement", "CreationOutsideSignedRoute");
+        Add("Grant", "Lifecycle", "Network", "Membership", "Epoch", "Issuer", "Generation", "IssuerWindow", "RouteExpiry", "Lifetime", "Signature");
+        Add("EndpointPair", "NetworkChanged", "DirectoryExpired", "DirectoryFloorAdvanced", "DirectoryExpiredBeforeHandoff");
+        Add("RetainedRead", "GrantHorizon", "GrantOverlap", "RequestInterval", "GrantStart", "ResponseDeadline", "IssuedBeforeRequest", "IssuedAfterRequest", "IssuedAfterCurrentUpper");
+        Add("Ingress", "MalformedFrame", "WrongOrigin", "Saturated", "Unavailable");
+        Add("Claim", "Expired", "StaleBundle", "RateLimited", "Conflict", "OutcomeUnknown");
+        foreach (var artifact in new[] { "XNA1", "XNV1", "XNH1", "ADH1", "DeviceCertificate", "DCA1", "PMT2", "XRA1", "PMS2", "XRC1", "XSS1", "XIR1V2", "XRR1", "ThresholdAuthoring", "ResolveRequest" })
+            Add("RouteTime" + artifact, "InvalidInterval", "NotBefore", "Expiry");
+        return result;
+    }
+    private static void ClosedNames(JsonElement value, params string[] names)
+    {
+        if (value.ValueKind != JsonValueKind.Object) throw new InvalidDataException();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var field in value.EnumerateObject()) if (!seen.Add(field.Name) || !names.Contains(field.Name, StringComparer.Ordinal)) throw new InvalidDataException();
+        if (seen.Count != names.Length) throw new InvalidDataException();
+    }
+    private static void MaintenanceLocation(JsonElement value)
+    {
+        var method = value.GetProperty("method").GetString();
+        var il = value.GetProperty("il").GetInt64();
+        if (method is null || method.Length > 240 || il is < -1 or > 1048575 ||
+            method != "Unavailable" && !System.Text.RegularExpressions.Regex.IsMatch(method, @"\ADeep\.(?:Client\.Shared|Protocol)\.[A-Za-z0-9_.+<>`]+\z")) throw new InvalidDataException();
+    }
+    private static JsonElement ValidateMaintenanceFailure(JsonElement failure)
+    {
+        ClosedNames(failure, "phase", "causes");
+        if (failure.GetProperty("phase").GetString() != "ContactMaintenance") throw new InvalidDataException();
+        var causes = failure.GetProperty("causes");
+        if (causes.ValueKind != JsonValueKind.Array || causes.GetArrayLength() is < 1 or > 8) throw new InvalidDataException();
+        foreach (var cause in causes.EnumerateArray())
+        {
+            ClosedNames(cause, "category", "check", "method", "il", "trail");
+            if (!MaintenanceCategories.Contains(cause.GetProperty("category").GetString()!) || !MaintenanceChecks.Contains(cause.GetProperty("check").GetString()!)) throw new InvalidDataException();
+            MaintenanceLocation(cause);
+            var trail = cause.GetProperty("trail");
+            if (trail.ValueKind != JsonValueKind.Array || trail.GetArrayLength() > 8) throw new InvalidDataException();
+            foreach (var frame in trail.EnumerateArray()) { ClosedNames(frame, "method", "il"); MaintenanceLocation(frame); }
+        }
+        return failure.Clone();
     }
 
     public object MaintenanceSummary()
@@ -310,7 +365,8 @@ public sealed class DeliveryEventController
             completed = pair.Value.CompletedMaintenance, cancelled = pair.Value.CancelledMaintenance, failed = pair.Value.FailedMaintenance,
             frames = pair.Value.MaintenanceFrames, acceptedContacts = pair.Value.LastMaintenanceCounts[0],
             controlsStored = pair.Value.LastMaintenanceCounts[1], deferredContacts = pair.Value.LastMaintenanceCounts[2],
-            reintroductions = pair.Value.LastMaintenanceCounts[3]
+            reintroductions = pair.Value.LastMaintenanceCounts[3], processedEnvelopes = pair.Value.LastMaintenanceCounts[4],
+            hasMore = pair.Value.LastMaintenanceHasMore, lastFailure = pair.Value.LastMaintenanceFailure
         }).ToArray();
     }
 
@@ -397,7 +453,9 @@ public sealed class DeliveryEventController
         internal long Sequence, Command, Timestamp, Submitted, Frames;
         internal long MaintenanceSequence, MaintenanceCycle, MaintenanceFrames, CompletedMaintenance, CancelledMaintenance, FailedMaintenance;
         internal bool MaintenanceActive;
-        internal long[] LastMaintenanceCounts = new long[4];
+        internal long[] LastMaintenanceCounts = new long[5];
+        internal bool LastMaintenanceHasMore;
+        internal JsonElement? LastMaintenanceFailure;
         internal long? ReportedDropped, ReportedSequence;
         internal bool Closed, Eof, TerminalSeen;
         internal readonly HashSet<string> Seen = new(StringComparer.Ordinal);

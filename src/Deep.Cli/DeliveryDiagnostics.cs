@@ -31,14 +31,28 @@ internal sealed class DeliveryDiagnostics : EventListener, IAsyncDisposable
         return new Scope(() => Current.Value = parent);
     }
 
-    internal void ObserveMaintenance(long cycle, string phase, Deep.Client.Shared.Services.DeepIdV2ContactMaintenanceResult? result = null)
+    internal void ObserveMaintenance(long cycle, string phase, Deep.Client.Shared.Services.DeepIdV2ContactMaintenanceResult? result = null,
+        Exception? failure = null)
     {
         if (cycle <= 0 || phase is not ("Started" or "Completed" or "Cancelled" or "Failed") ||
-            (phase == "Completed") != (result is not null)) throw new ArgumentException("Invalid maintenance observation.");
+            (phase == "Completed") != (result is not null) || (phase == "Failed") != (failure is not null))
+            throw new ArgumentException("Invalid maintenance observation.");
+        object? closedFailure = null;
+        if (failure is not null)
+        {
+            // Reuse the foreground mapper's bounded cause and owned-method
+            // allowlists. Arbitrary exception text, paths and payloads never
+            // enter this observer; diagnostic failure cannot stop maintenance.
+            try { closedFailure = new CliBusinessException("ContactMaintenance", failure).ClosedDiagnostic(); }
+            catch { closedFailure = new { phase = "ContactMaintenance", causes = new[] {
+                new { category = "Other", check = "Unclassified", method = "Unavailable", il = -1, trail = Array.Empty<object>() } } }; }
+        }
         lock (gate)
             if (!frames.Writer.TryWrite(JsonSerializer.Serialize(new { schema = "deep.maintenance.v1", sequence = ++maintenanceSequence,
                 cycle, phase, acceptedContacts = result?.AcceptedContacts ?? 0, controlsStored = result?.ControlsStored ?? 0,
-                deferredContacts = result?.DeferredContacts ?? 0, reintroductions = result?.Reintroductions ?? 0 }))) dropped++;
+                deferredContacts = result?.DeferredContacts ?? 0, reintroductions = result?.Reintroductions ?? 0,
+                processedEnvelopes = result?.ProcessedEnvelopes ?? 0, hasMore = result?.HasMore ?? false,
+                failure = closedFailure }))) dropped++;
     }
 
     protected override void OnEventSourceCreated(EventSource source)

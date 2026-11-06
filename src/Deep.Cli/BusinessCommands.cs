@@ -64,7 +64,7 @@ internal static class BusinessCommands
             var messagingSource = session is not null && established
                 ? network.EstablishedMessagingSource : network.Source;
             if (command is { Area: "contact", Operation: "route-health" })
-                return new { status = "ok", health = await accounts.ReadContactRouteHealthAsync(conversation!, network.Source, ct) };
+                return new { status = "ok", health = await accounts.ReadContactRouteDiagnosticsAsync(conversation!, network.Source, ct) };
             if (command is { Area: "contact", Operation: "route-verify" })
             {
                 phase = "ContactRouteVerification";

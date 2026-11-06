@@ -5,6 +5,20 @@ namespace Deep.Cli.Tests;
 
 public sealed class SessionTests
 {
+    [Theory]
+    [InlineData(0, 0, 0, 60)]
+    [InlineData(1, 0, 0, 10)]
+    [InlineData(0, 1, 0, 10)]
+    [InlineData(0, 0, 1, 10)]
+    public void ContactMaintenanceProgressUsesNextIdleTickButDeferralAloneKeepsPause(
+        int controls, int processed, int reintroductions, int seconds)
+    {
+        var completed = new Deep.Client.Shared.Services.DeepIdV2ContactMaintenanceResult(1, controls, 1,
+            processed, 0, false, reintroductions);
+        Assert.Equal(TimeSpan.FromSeconds(seconds), CliSession.ContactMaintenancePause(completed));
+        Assert.Equal(TimeSpan.FromSeconds(60), CliSession.ContactMaintenancePause(null));
+    }
+
     [Fact]
     public async Task ForegroundArrivalCancelsActualIdleLoanAndCannotBeOvertakenByAnotherCycle()
     {
