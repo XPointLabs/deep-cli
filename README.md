@@ -102,15 +102,25 @@ the CLI installs its actual native messaging owner. `network maintain` runs the
 same cycle without repeating account admission: renew own publication once,
 receive one bounded ordinary mailbox/independent ACK page, then visit every
 accepted retained device scope. `network publish` remains bootstrap-only.
-`verify`/`maintain` optionally accept `--known-contacts` as a JSON array of exact
+`verify`/`maintain` and `session run` optionally accept `--known-contacts` as a JSON array of exact
 `conversation` and canonical `address` strings (at most128 entries). Prefer private
 session stdin, not shell arguments/history: descriptors contain resolver-read
-capabilities. This caller-owned book is never authority or emitted in diagnostics;
+capabilities. Explicitly supplied entries are merged into a bounded protected
+address book bound to the same account instance, and survive a cold restart.
+An absent book on an older retained profile starts empty; no address or
+capability is derived from an identifier. This book is never authority or emitted in diagnostics;
 the existing native same-peer consent/scope/control owner independently verifies
 any expired-route re-introduction. Faults and missing descriptors still defer.
 Sending a control does not mean the peer route has been adopted. Counts report
-partial work, not readiness; periodic scheduling and durable descriptor exchange
-are not supplied by this command. See the normative
+partial work, not readiness. An activated `session run` also schedules an idle
+contact cycle at most once per minute, with a six-minute cancellation budget.
+Arriving commands cancel background work before waiting for its serial account
+loan; exact staged controls remain owned for a later cycle. Network failure
+discards the public composition and a later idle opportunity reopens it from
+the same bootstrap/profile. Background work never retries a business command.
+The session's ten-second idle check also maintains public group authority.
+Descriptor exchange remains explicit; the protected book retains only data
+the caller actually supplied. See the normative
 [DR-0174](../docs/survival-program/decisions/DR-0174-connection-contact-maintenance.md).
 `Invoke-ContactRouteRepair.ps1 -ConnectionCycle` tests these actual Shared cycles
 on retained profiles without invoking manual per-contact repair commands.
@@ -471,9 +481,20 @@ semantic materialization before the first command returns. Local history can be
 read after closing/reopening the CLI, independently of ACK network latency. The
 settling sync must finish the retained page's exact ACK before the next page;
 it independently reconstructs native/semantic custody and current authority.
-A repeated receive resumes the same page and remains idempotent. No automatic
-background ACK scheduler is introduced; hosts must explicitly drain pending work.
+A repeated receive resumes the same page and remains idempotent. Background
+contact maintenance acknowledges a nonempty page only when every authenticated,
+durably processed item is DMC2/14. Mixed/application pages remain pending until
+explicit sync; the ACK owner independently verifies the exact page in both cases.
 The existing full group/messages and direct/list commands remain available for
 comparison and integrity qualification. Recent reads keep their actual protected
 account/catalog/native checks; group recent selects bounded operations before
 opening their native scopes, while direct recent pushes its bound into SQL.
+
+`eng/Measure-RetainedBalancedDelivery.ps1` measures the retained three clients
+without creating contacts or resetting profiles. Private `network connect`
+frames seed actual known descriptors and enable idle maintenance. Readiness
+requires signed XUR1 successors adopted in all six directions and current
+DMC2/14 delivery routes. The default engineering population is 24 direct and
+24 group messages (nearest-rank p95 is observation23); group latency ends when
+both recipients return the exact plaintext from ordinary history. Report
+observed-read coverage separately from failures, recovery and post-read ACK.

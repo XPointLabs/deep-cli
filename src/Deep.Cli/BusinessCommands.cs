@@ -84,6 +84,7 @@ internal static class BusinessCommands
             }
             phase = (command.Area, command.Operation) switch
             {
+                ("network", "connect") => "NetworkConnect",
                 ("network", "verify") => "NetworkVerify",
                 ("network", "refresh") => "NetworkRefresh",
                 ("network", "maintain") => "NetworkMaintain",
@@ -102,8 +103,14 @@ internal static class BusinessCommands
                 ("group", "create" or "invite" or "accept" or "advance" or "send" or "flush" or "resume" or "sync" or "publish") => "GroupWork",
                 _ => throw new ArgumentException("Unsupported business operation.")
             };
+            if (phase == "NetworkConnect")
+            {
+                await network.ConnectForBackgroundMaintenanceAsync(command.KnownContacts, ct);
+                session?.EnableContactMaintenance();
+                return new { status = "connected", networkConnected = true, backgroundMaintenanceScheduled = session is not null };
+            }
             if (phase == "NetworkVerify")
-            { var maintenance = await network.VerifyAndMaintainContactsAsync(command.KnownContacts, ct); return new { status = "ok", networkVerified = true, contactPublished = true, maintenance }; }
+            { var maintenance = await network.VerifyAndMaintainContactsAsync(command.KnownContacts, ct); session?.EnableContactMaintenance(); return new { status = "ok", networkVerified = true, contactPublished = true, maintenance }; }
             if (phase == "NetworkPublish")
             { await network.VerifyAndPublishAsync(ct); return new { status = "published", networkVerified = true, contactPublished = true }; }
             if (phase == "NetworkRefresh")
@@ -111,6 +118,7 @@ internal static class BusinessCommands
             if (phase == "NetworkMaintain")
             {
                 var maintenance = await accounts.MaintainContactRoutesAsync(network.Source, command.KnownContacts, ct);
+                session?.EnableContactMaintenance();
                 return new { status = maintenance.DeferredContacts == 0 && !maintenance.HasMore ? "maintained" : "partial", maintenance };
             }
             if (phase == "GroupWork")

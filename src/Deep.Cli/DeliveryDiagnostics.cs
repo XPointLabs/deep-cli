@@ -16,6 +16,7 @@ internal sealed class DeliveryDiagnostics : EventListener, IAsyncDisposable
     private readonly Task pump;
     private readonly TextWriter output;
     private long sequence, command, dropped;
+    private long maintenanceSequence;
 
     internal DeliveryDiagnostics(TextWriter output) { this.output = output; pump = PumpAsync(output); }
 
@@ -28,6 +29,16 @@ internal sealed class DeliveryDiagnostics : EventListener, IAsyncDisposable
             Emit(command, "CommandAccepted", "", "");
         }
         return new Scope(() => Current.Value = parent);
+    }
+
+    internal void ObserveMaintenance(long cycle, string phase, Deep.Client.Shared.Services.DeepIdV2ContactMaintenanceResult? result = null)
+    {
+        if (cycle <= 0 || phase is not ("Started" or "Completed" or "Cancelled" or "Failed") ||
+            (phase == "Completed") != (result is not null)) throw new ArgumentException("Invalid maintenance observation.");
+        lock (gate)
+            if (!frames.Writer.TryWrite(JsonSerializer.Serialize(new { schema = "deep.maintenance.v1", sequence = ++maintenanceSequence,
+                cycle, phase, acceptedContacts = result?.AcceptedContacts ?? 0, controlsStored = result?.ControlsStored ?? 0,
+                deferredContacts = result?.DeferredContacts ?? 0, reintroductions = result?.Reintroductions ?? 0 }))) dropped++;
     }
 
     protected override void OnEventSourceCreated(EventSource source)

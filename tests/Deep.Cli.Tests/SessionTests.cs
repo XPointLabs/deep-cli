@@ -5,6 +5,38 @@ namespace Deep.Cli.Tests;
 
 public sealed class SessionTests
 {
+    [Fact]
+    public async Task ForegroundArrivalCancelsActualIdleLoanAndCannotBeOvertakenByAnotherCycle()
+    {
+        using var session = new CliSession(Binding());
+        Assert.True(session.TryStartMaintenance(out var idle));
+        Assert.False(session.TryStartMaintenance(out _));
+        var command = session.EnterCommandAsync(default);
+        Assert.True(idle!.IsCancellationRequested);
+        Assert.False(command.IsCompleted);
+        Assert.False(session.TryStartMaintenance(out _));
+        session.EndMaintenance(idle);
+        await command.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.False(session.TryStartMaintenance(out _));
+        session.LeaveCommand();
+        Assert.True(session.TryStartMaintenance(out var next));
+        Assert.False(next!.IsCancellationRequested);
+        session.EndMaintenance(next);
+    }
+
+    [Fact]
+    public async Task CancelledCommandWaitReleasesPriorityWithoutReleasingTheActiveIdleLoan()
+    {
+        using var session = new CliSession(Binding());
+        Assert.True(session.TryStartMaintenance(out var idle));
+        using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => session.EnterCommandAsync(cancelled.Token));
+        Assert.False(session.TryStartMaintenance(out _));
+        session.EndMaintenance(idle!);
+        Assert.True(session.TryStartMaintenance(out var next));
+        session.EndMaintenance(next!);
+    }
+
     private static CommandLine Binding() => CommandLine.Parse(["session", "run", "--profile",
         "session-" + Guid.NewGuid().ToString("N")[..20], "--network",
         Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16)), "--bootstrap", "public-bundle",

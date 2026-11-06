@@ -10,6 +10,8 @@ public sealed class DeliveryMeasurementTests
         JsonSerializer.Serialize(new { schema = "deep.delivery.v1", sequence, command, phase, messageHash = message, deliveryHash = delivery });
     private static string End(long sequence, long dropped = 0) => JsonSerializer.Serialize(new
         { schema = "deep.delivery.v1", sequence, command = 0, phase = "StreamClosed", messageHash = "", deliveryHash = "", dropped });
+    private static string Maintenance(long sequence, long cycle, string phase, int acceptedContacts = 0, int controlsStored = 0) =>
+        JsonSerializer.Serialize(new { schema = "deep.maintenance.v1", sequence, cycle, phase, acceptedContacts, controlsStored, deferredContacts = 0, reintroductions = 0 });
     private static Task Register(DeliveryEventController controller, params int[] roles)
     { foreach (var role in roles) controller.Register(role); return Task.CompletedTask; }
     private static void Close(DeliveryEventController controller, int role, long sequence)
@@ -126,6 +128,115 @@ public sealed class DeliveryMeasurementTests
         Assert.Equal(19, DeliveryEventController.NearestRank(values, .95));
         Assert.Equal(double.PositiveInfinity, DeliveryEventController.NearestRank(values, .99));
         Assert.Equal(double.PositiveInfinity, DeliveryEventController.NearestRank([1, double.PositiveInfinity], .95));
+    }
+
+    [Fact]
+    public async Task ValidatedOrdinaryResultMeasuresBackgroundInboxDeliveryWithoutInventingVisibilityEvents()
+    {
+        long ticks = 1000;
+        var controller = new DeliveryEventController(() => ticks, 1000);
+        await Register(controller, 1, 2);
+        controller.BeginCommand(1);
+        controller.ObserveFrame(1, Frame(1, 1, "CommandAccepted"));
+        controller.CompleteCommand(1, 1, 0);
+        ticks += 30;
+        controller.BeginCommand(2);
+        controller.ObserveFrame(2, Frame(1, 1, "CommandAccepted"));
+        ticks += 20;
+        controller.CompleteCommand(2, 1, 0);
+        controller.RecordHistoryRead(1, 1, 2, 1);
+        Assert.Equal(double.PositiveInfinity, controller.ValidatedHistoryReadMilliseconds(1, 1, 2));
+        Close(controller, 1, 2); Close(controller, 2, 2);
+        Assert.Equal(50, controller.ValidatedHistoryReadMilliseconds(1, 1, 2));
+        Assert.Equal(double.PositiveInfinity, controller.HistoryReadMilliseconds(1, 1, [2], 2));
+        Assert.Equal(double.PositiveInfinity, controller.ValidatedHistoryReadMilliseconds(1, 1, 1));
+        Assert.Equal(double.PositiveInfinity, controller.ValidatedHistoryReadMilliseconds(1, 2, 2));
+    }
+
+    [Fact]
+    public async Task ExactOriginalRecoveryDoesNotRejectIndependentLaterSamplesOrQualifyFailedAdmission()
+    {
+        var controller = new DeliveryEventController();
+        await Register(controller, 1, 2);
+        controller.BeginCommand(1);
+        controller.ObserveFrame(1, Frame(1, 1, "CommandAccepted"));
+        controller.ObserveFrame(1, Frame(2, 1, "NativeOutboxDurable", Message, Left));
+        controller.CompleteCommand(1, 1, 6);
+
+        controller.BeginCommand(1);
+        controller.ObserveFrame(1, Frame(3, 2, "CommandAccepted"));
+        controller.ObserveFrame(1, Frame(4, 2, "StoreQuorum", Message, Left));
+        controller.CompleteCommand(1, 2, 0);
+        controller.BeginCommand(2);
+        controller.ObserveFrame(2, Frame(1, 1, "CommandAccepted"));
+        controller.ObserveFrame(2, Frame(2, 1, "RecipientDurableReadable", Message, Left));
+        controller.CompleteCommand(2, 1, 0);
+        controller.RecordHistoryRead(1, 1, 2, 1);
+
+        var next = new string('d', 64);
+        controller.BeginCommand(1);
+        controller.ObserveFrame(1, Frame(5, 3, "CommandAccepted"));
+        controller.ObserveFrame(1, Frame(6, 3, "NativeOutboxDurable", next, Right));
+        controller.ObserveFrame(1, Frame(7, 3, "StoreQuorum", next, Right));
+        controller.CompleteCommand(1, 3, 0);
+        controller.BeginCommand(2);
+        controller.ObserveFrame(2, Frame(3, 2, "CommandAccepted"));
+        controller.ObserveFrame(2, Frame(4, 2, "RecipientDurableReadable", next, Right));
+        controller.CompleteCommand(2, 2, 0);
+        Close(controller, 1, 8); Close(controller, 2, 5);
+
+        Assert.False(controller.Rejected);
+        Assert.False(controller.Sample(1, 1, [2]).Complete);
+        Assert.True(double.IsFinite(controller.ObservedValidatedHistoryReadMilliseconds(1, 1, 2)));
+        Assert.Equal(double.PositiveInfinity, controller.ValidatedHistoryReadMilliseconds(1, 1, 2));
+        Assert.True(controller.Sample(1, 3, [2]).Complete);
+    }
+
+    [Fact]
+    public async Task MaintenanceTelemetryCanBeObservedWithoutAdmittingOrCancellingACommand()
+    {
+        var controller = new DeliveryEventController();
+        await Register(controller, 1);
+        controller.ObserveFrame(1, Maintenance(1, 1, "Started"));
+        using (var active = JsonDocument.Parse(JsonSerializer.Serialize(controller.MaintenanceSummary())))
+        { Assert.True(active.RootElement[0].GetProperty("active").GetBoolean()); }
+        controller.ObserveFrame(1, Maintenance(2, 1, "Completed", 2, 1));
+        using (var done = JsonDocument.Parse(JsonSerializer.Serialize(controller.MaintenanceSummary())))
+        {
+            Assert.False(done.RootElement[0].GetProperty("active").GetBoolean());
+            Assert.Equal(1, done.RootElement[0].GetProperty("completed").GetInt64());
+            Assert.Equal(2, done.RootElement[0].GetProperty("acceptedContacts").GetInt64());
+        }
+        Assert.Equal(1, controller.BeginCommand(1));
+        controller.ObserveFrame(1, Frame(1, 1, "CommandAccepted"));
+        controller.CompleteCommand(1, 1, 0);
+        Close(controller, 1, 2);
+        Assert.False(controller.Rejected);
+    }
+
+    [Theory]
+    [InlineData("sequence")]
+    [InlineData("cycle")]
+    [InlineData("phase")]
+    [InlineData("unknown-field")]
+    [InlineData("negative-count")]
+    [InlineData("unfinished")]
+    public async Task MalformedMaintenanceCannotQualifyDeliveryStream(string defect)
+    {
+        var controller = new DeliveryEventController();
+        await Register(controller, 1);
+        controller.ObserveFrame(1, Maintenance(1, 1, "Started"));
+        var frame = defect switch
+        {
+            "sequence" => Maintenance(3, 1, "Completed"),
+            "cycle" => Maintenance(2, 2, "Completed"),
+            "phase" => Maintenance(2, 1, "Unknown"),
+            "unknown-field" => Maintenance(2, 1, "Completed")[..^1] + ",\"payload\":\"forbidden\"}",
+            "negative-count" => Maintenance(2, 1, "Completed", -1),
+            _ => End(1)
+        };
+        controller.ObserveFrame(1, frame);
+        Assert.True(controller.Rejected);
     }
 
     [Fact]

@@ -25,6 +25,8 @@ public sealed class DeliveryEventController
     private bool rejected;
     public bool Rejected { get { lock (gate) return rejected; } }
     public int MaximumEvents => maximumEvents;
+    public bool HasCommandAdmission(int client, long command)
+    { lock (gate) return rows.Any(row => row.Client == client && row.Command == command && row.Phase == "CommandAccepted"); }
     public DeliveryEventController() : this(Stopwatch.GetTimestamp, Stopwatch.Frequency) { }
     public DeliveryEventController(int maximumEvents) : this(Stopwatch.GetTimestamp, Stopwatch.Frequency, maximumEvents) { }
     internal DeliveryEventController(Func<long> clock, long frequency, int maximumEvents = 4096)
@@ -109,6 +111,36 @@ public sealed class DeliveryEventController
         }
     }
 
+    // The ordinary read result is independently correlated by the harness in
+    // RAM before RecordHistoryRead. Background inbox maintenance can persist the
+    // envelope outside a foreground diagnostic scope, so its visibility event is
+    // not a prerequisite for this actual admission-to-return measurement.
+    // This API does not certify Store, ACK, duplicate absence or recovery: the
+    // driver must require those separately for a finite first-attempt sample.
+    public double ValidatedHistoryReadMilliseconds(int sender, long command, int recipient)
+        => ValidatedHistoryReadMillisecondsCore(sender, command, recipient, requireSuccessfulAdmission: true);
+
+    public double ObservedValidatedHistoryReadMilliseconds(int sender, long command, int recipient)
+        => ValidatedHistoryReadMillisecondsCore(sender, command, recipient, requireSuccessfulAdmission: false);
+
+    private double ValidatedHistoryReadMillisecondsCore(int sender, long command, int recipient, bool requireSuccessfulAdmission)
+    {
+        lock (gate)
+        {
+            if (rejected || sender == recipient || streams.Values.Any(stream => !stream.Closed || !stream.Eof) ||
+                !streams.TryGetValue(sender, out var source) ||
+                !source.Outcomes.TryGetValue(command, out var sourceExit) || requireSuccessfulAdmission && sourceExit != 0 ||
+                !historyReads.TryGetValue((sender, command, recipient), out var readCommand) ||
+                !streams.TryGetValue(recipient, out var target) ||
+                !target.Outcomes.TryGetValue(readCommand, out var readExit) || readExit != 0) return double.PositiveInfinity;
+            var accepted = rows.SingleOrDefault(row => row.Client == sender && row.Command == command && row.Phase == "CommandAccepted");
+            var read = rows.SingleOrDefault(row => row.Client == recipient && row.Command == readCommand && row.Phase == "CommandAccepted");
+            var completed = target.CompletedAt[readCommand];
+            return accepted is null || read is null || read.Timestamp < accepted.Timestamp || completed < read.Timestamp
+                ? double.PositiveInfinity : (completed - accepted.Timestamp) * 1000.0 / frequency;
+        }
+    }
+
     // Diagnostic evidence survives a failed sender/ACK outcome, while Sample and
     // HistoryReadMilliseconds retain their strict first-attempt qualification.
     public double ObservedHistoryReadMilliseconds(int sender, long command, int recipient)
@@ -185,8 +217,14 @@ public sealed class DeliveryEventController
                 if (root.ValueKind != JsonValueKind.Object) throw new InvalidDataException();
                 var names = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var field in root.EnumerateObject())
-                    if (!names.Add(field.Name) || field.Name is not ("schema" or "sequence" or "command" or "phase" or "messageHash" or "deliveryHash" or "dropped"))
+                    if (!names.Add(field.Name))
                         throw new InvalidDataException();
+                if (root.GetProperty("schema").GetString() == "deep.maintenance.v1")
+                {
+                    ObserveMaintenance(stream, root, names); return;
+                }
+                if (names.Any(name => name is not ("schema" or "sequence" or "command" or "phase" or "messageHash" or "deliveryHash" or "dropped")))
+                    throw new InvalidDataException();
                 if (root.GetProperty("schema").GetString() != "deep.delivery.v1") throw new InvalidDataException();
                 var sequence = root.GetProperty("sequence").GetInt64();
                 var command = root.GetProperty("command").GetInt64();
@@ -200,7 +238,7 @@ public sealed class DeliveryEventController
                         throw new InvalidDataException();
                     stream.TerminalSeen = true; stream.ReportedDropped = dropped; stream.ReportedSequence = sequence;
                     if (rejected) return; // Keep closed loss diagnostics without restoring qualification.
-                    if (stream.Closed || dropped != 0 || sequence != stream.Sequence + 1 || timestamp < stream.Timestamp)
+                    if (stream.Closed || stream.MaintenanceActive || dropped != 0 || sequence != stream.Sequence + 1 || timestamp < stream.Timestamp)
                         throw new InvalidDataException();
                     stream.Closed = true; stream.Sequence = sequence; stream.Timestamp = timestamp; return;
                 }
@@ -216,8 +254,16 @@ public sealed class DeliveryEventController
                 {
                     if (phase is not ("NativeOutboxDurable" or "StoreQuorum" or "RecipientDurableReadable") ||
                         command != stream.Command || !IsHash(message) || !IsHash(delivery) ||
-                        !stream.Seen.Add(phase + ":" + message + ":" + delivery)) throw new InvalidDataException();
-                    if (phase == "StoreQuorum" && !stream.Seen.Contains("NativeOutboxDurable:" + message + ":" + delivery))
+                        !stream.Seen.Add(command + ":" + phase + ":" + message + ":" + delivery)) throw new InvalidDataException();
+                    // A later, explicitly recorded recovery command can observe
+                    // the same original envelope. A duplicate transition within
+                    // one command still rejects the stream; recovery is never
+                    // folded into a first-attempt latency sample.
+                    if (phase == "NativeOutboxDurable") stream.Outboxes.Add(message + ":" + delivery);
+                    // Exact-original resume may emit Store without repeating its
+                    // earlier durable-outbox transition. It must still match an
+                    // actually observed prior outbox on this same client stream.
+                    if (phase == "StoreQuorum" && !stream.Outboxes.Contains(message + ":" + delivery))
                         throw new InvalidDataException();
                 }
                 stream.Sequence = sequence; stream.Timestamp = timestamp;
@@ -226,6 +272,46 @@ public sealed class DeliveryEventController
             catch (Exception error) when (error is JsonException or InvalidDataException or InvalidOperationException or FormatException or OverflowException or KeyNotFoundException)
             { rejected = true; }
         }
+    }
+
+    private void ObserveMaintenance(StreamState stream, JsonElement root, HashSet<string> names)
+    {
+        if (stream.Closed || names.Count != 8 || names.Any(name => name is not
+            ("schema" or "sequence" or "cycle" or "phase" or "acceptedContacts" or "controlsStored" or "deferredContacts" or "reintroductions")) ||
+            ++stream.MaintenanceFrames > maximumEvents) throw new InvalidDataException();
+        var sequence = root.GetProperty("sequence").GetInt64();
+        var cycle = root.GetProperty("cycle").GetInt64();
+        var phase = root.GetProperty("phase").GetString();
+        var counts = new[] { "acceptedContacts", "controlsStored", "deferredContacts", "reintroductions" }
+            .Select(name => root.GetProperty(name).GetInt64()).ToArray();
+        if (sequence != stream.MaintenanceSequence + 1 || counts.Any(count => count is < 0 or > 65536)) throw new InvalidDataException();
+        if (phase == "Started")
+        {
+            if (stream.MaintenanceActive || cycle != stream.MaintenanceCycle + 1 || counts.Any(count => count != 0)) throw new InvalidDataException();
+            stream.MaintenanceActive = true; stream.MaintenanceCycle = cycle;
+        }
+        else
+        {
+            if (!stream.MaintenanceActive || cycle != stream.MaintenanceCycle || phase is not ("Completed" or "Cancelled" or "Failed")) throw new InvalidDataException();
+            if (phase != "Completed" && counts.Any(count => count != 0)) throw new InvalidDataException();
+            if (phase == "Completed") { stream.CompletedMaintenance++; stream.LastMaintenanceCounts = counts; }
+            else if (phase == "Cancelled") stream.CancelledMaintenance++;
+            else stream.FailedMaintenance++;
+            stream.MaintenanceActive = false;
+        }
+        stream.MaintenanceSequence = sequence;
+    }
+
+    public object MaintenanceSummary()
+    {
+        lock (gate) return streams.OrderBy(pair => pair.Key).Select(pair => new
+        {
+            role = pair.Key, active = pair.Value.MaintenanceActive, cycle = pair.Value.MaintenanceCycle,
+            completed = pair.Value.CompletedMaintenance, cancelled = pair.Value.CancelledMaintenance, failed = pair.Value.FailedMaintenance,
+            frames = pair.Value.MaintenanceFrames, acceptedContacts = pair.Value.LastMaintenanceCounts[0],
+            controlsStored = pair.Value.LastMaintenanceCounts[1], deferredContacts = pair.Value.LastMaintenanceCounts[2],
+            reintroductions = pair.Value.LastMaintenanceCounts[3]
+        }).ToArray();
     }
 
     private static bool IsHash(string? value) => value != null && value.Length == 64 && value.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
@@ -309,9 +395,13 @@ public sealed class DeliveryEventController
     private sealed class StreamState
     {
         internal long Sequence, Command, Timestamp, Submitted, Frames;
+        internal long MaintenanceSequence, MaintenanceCycle, MaintenanceFrames, CompletedMaintenance, CancelledMaintenance, FailedMaintenance;
+        internal bool MaintenanceActive;
+        internal long[] LastMaintenanceCounts = new long[4];
         internal long? ReportedDropped, ReportedSequence;
         internal bool Closed, Eof, TerminalSeen;
         internal readonly HashSet<string> Seen = new(StringComparer.Ordinal);
+        internal readonly HashSet<string> Outboxes = new(StringComparer.Ordinal);
         internal readonly Dictionary<long, int> Outcomes = new();
         internal readonly Dictionary<long, long> CompletedAt = new();
     }

@@ -29,6 +29,14 @@ public sealed class KnownContactOptionsTests
         Assert.Empty(CommandLine.Parse(Args("[]")).KnownContacts!);
     }
 
+    [Fact]
+    public void SessionAcceptsExplicitActualAddressSeedForBackgroundRecovery()
+    {
+        var args = Args(JsonSerializer.Serialize(new[] { new { conversation = new string('a', 64), address = Address } }));
+        args[0] = "session"; args[1] = "run";
+        Assert.Equal(Address, Assert.Single(CommandLine.Parse(args).KnownContacts!).Value.CanonicalText);
+    }
+
     [Theory]
     [InlineData(0)]
     [InlineData(1)]

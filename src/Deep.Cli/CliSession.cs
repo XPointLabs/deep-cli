@@ -14,8 +14,16 @@ internal sealed class CliSession(CommandLine binding) : IDisposable, IAsyncDispo
     private readonly SemaphoreSlim operations = new(1, 1);
     private readonly CancellationTokenSource stopping = new();
     private Task? maintenance;
+    private readonly object maintenanceSync = new();
+    private CancellationTokenSource? activeMaintenance;
+    private int foregroundCommands;
+    private long nextContactMaintenance;
+    private bool connectionActivated;
+    private bool contactMaintenanceActivated;
+    private bool knownContactsSeeded;
     private DeliveryDiagnostics? delivery;
     private long maintenanceChecks, maintenanceFailures, maintenanceMilliseconds;
+    private long maintenanceCycles;
     private bool disposed;
 
     internal void RequireBinding(CommandLine command)
@@ -40,12 +48,45 @@ internal sealed class CliSession(CommandLine binding) : IDisposable, IAsyncDispo
     {
         RequireBinding(command);
         ct.ThrowIfCancellationRequested();
-        return network ??= await NetworkBootstrap.OpenAsync(binding,
+        var result = network ??= await NetworkBootstrap.OpenAsync(binding,
             (await GetProfileAsync(command, ct).ConfigureAwait(false)).Accounts, ct).ConfigureAwait(false);
+        connectionActivated = true;
+        return result;
     }
 
     internal void InvalidateNetwork() { network?.Dispose(); network = null; }
+    internal void EnableContactMaintenance() => contactMaintenanceActivated = true;
     internal object Snapshot() => new { maintenanceChecks, maintenanceFailures, maintenanceMilliseconds };
+
+    internal bool TryStartMaintenance(out CancellationTokenSource? budget)
+    {
+        lock (maintenanceSync)
+        {
+            budget = null;
+            if (foregroundCommands != 0 || !operations.Wait(0)) return false;
+            budget = CancellationTokenSource.CreateLinkedTokenSource(stopping.Token);
+            activeMaintenance = budget; return true;
+        }
+    }
+
+    internal void EndMaintenance(CancellationTokenSource budget)
+    {
+        lock (maintenanceSync) { activeMaintenance = null; budget.Dispose(); }
+        operations.Release();
+    }
+
+    internal async Task EnterCommandAsync(CancellationToken ct)
+    {
+        lock (maintenanceSync) { foregroundCommands++; activeMaintenance?.Cancel(); }
+        try { await operations.WaitAsync(ct).ConfigureAwait(false); }
+        catch { lock (maintenanceSync) foregroundCommands--; throw; }
+    }
+
+    internal void LeaveCommand()
+    {
+        operations.Release();
+        lock (maintenanceSync) foregroundCommands--;
+    }
 
     private async Task MaintainAsync()
     {
@@ -56,24 +97,49 @@ internal sealed class CliSession(CommandLine binding) : IDisposable, IAsyncDispo
             {
                 // Never queue behind delivery or refresh concurrently with an
                 // account operation. No private loan survives a command.
-                if (!await operations.WaitAsync(0, stopping.Token).ConfigureAwait(false)) continue;
+                if (!TryStartMaintenance(out var selectedBudget)) continue;
+                var budget = selectedBudget!;
                 var started = System.Diagnostics.Stopwatch.GetTimestamp();
+                var contactCycle = connectionActivated && contactMaintenanceActivated && started >= nextContactMaintenance;
+                var cycle = contactCycle ? ++maintenanceCycles : 0;
+                if (contactCycle)
+                {
+                    nextContactMaintenance = started + 60 * System.Diagnostics.Stopwatch.Frequency;
+                    delivery?.ObserveMaintenance(cycle, "Started");
+                }
                 try
                 {
-                    if (network is not null)
+                    if (connectionActivated)
                     {
-                        using var budget = CancellationTokenSource.CreateLinkedTokenSource(stopping.Token);
-                        budget.CancelAfter(TimeSpan.FromSeconds(30));
+                        budget.CancelAfter(TimeSpan.FromMinutes(6));
                         maintenanceChecks++;
-                        await network.MaintainGroupAuthorityAsync(budget.Token).ConfigureAwait(false);
+                        var connected = await GetNetworkAsync(binding with { Area = "network", Operation = "maintain" },
+                            budget.Token).ConfigureAwait(false);
+                        if (!contactCycle) await connected.MaintainGroupAuthorityAsync(budget.Token).ConfigureAwait(false);
+                        if (contactCycle)
+                        {
+                            // One bounded ordinary cycle, including exact pending
+                            // controls and a receive page. A foreground command
+                            // cancels this phase before waiting on the serial loan.
+                            var completed = await connected.MaintainContactsInBackgroundAsync(knownContactsSeeded ? null : binding.KnownContacts,
+                                budget.Token).ConfigureAwait(false);
+                            knownContactsSeeded = true;
+                            delivery?.ObserveMaintenance(cycle, "Completed", completed);
+                        }
                     }
                 }
-                catch (OperationCanceledException) when (stopping.IsCancellationRequested) { throw; }
-                catch { maintenanceFailures++; InvalidateNetwork(); } // no stale fallback, retry or payload logging
+                catch (OperationCanceledException) when (stopping.IsCancellationRequested)
+                { if (contactCycle) delivery?.ObserveMaintenance(cycle, "Cancelled"); throw; }
+                catch (OperationCanceledException) when (budget.IsCancellationRequested)
+                { if (contactCycle) delivery?.ObserveMaintenance(cycle, "Cancelled"); InvalidateNetwork(); } // Exact durable controls resume on a later opportunity.
+                catch
+                { if (contactCycle) delivery?.ObserveMaintenance(cycle, "Failed"); maintenanceFailures++; InvalidateNetwork(); } // no stale fallback, retry or payload logging
                 finally
                 {
+                    if (contactCycle) nextContactMaintenance = System.Diagnostics.Stopwatch.GetTimestamp() +
+                        60 * System.Diagnostics.Stopwatch.Frequency;
                     maintenanceMilliseconds += (long)System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;
-                    operations.Release();
+                    EndMaintenance(budget);
                 }
             }
         }
@@ -104,7 +170,7 @@ internal sealed class CliSession(CommandLine binding) : IDisposable, IAsyncDispo
         await using var delivery = binding.DeliveryEvents ? new DeliveryDiagnostics(diagnostics ?? TextWriter.Null) : null;
         session.delivery = delivery;
         session.maintenance = session.MaintainAsync();
-        return await RunFramesAsync(input, output, async args =>
+        try { return await RunFramesAsync(input, output, async args =>
         {
             using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
             budget.CancelAfter(Program.TimeoutFor(args));
@@ -118,9 +184,11 @@ internal sealed class CliSession(CommandLine binding) : IDisposable, IAsyncDispo
             // Admit the valid bound command before its serial queue wait. The
             // same parsed value is used by Program; no alternate command grammar.
             using var observation = admitted is null ? null : delivery?.AcceptCommand();
-            try { await session.operations.WaitAsync(budget.Token).ConfigureAwait(false); }
+            try { await session.EnterCommandAsync(budget.Token).ConfigureAwait(false); }
             catch (OperationCanceledException)
-            { return "{\"exitCode\":130,\"result\":{\"status\":\"error\",\"code\":\"cancelled\"}}"; }
+            {
+                return "{\"exitCode\":130,\"result\":{\"status\":\"error\",\"code\":\"cancelled\"}}";
+            }
             int exit;
             try
             {
@@ -129,11 +197,15 @@ internal sealed class CliSession(CommandLine binding) : IDisposable, IAsyncDispo
                 // invalid public composition for the next independent command.
                 if (exit != 0) session.InvalidateNetwork();
             }
-            finally { session.operations.Release(); }
+            finally
+            {
+                session.LeaveCommand();
+            }
             var encoded = exit == 0 ? stdout.ToString() : stderr.ToString();
             using var json = JsonDocument.Parse(encoded);
             return JsonSerializer.Serialize(new { exitCode = exit, result = json.RootElement });
-        }, ct).ConfigureAwait(false);
+        }, ct).ConfigureAwait(false); }
+        finally { await session.DisposeAsync().ConfigureAwait(false); } // Close background observation before delivery stream terminal.
     }
 
     // JSON argument arrays over private stdio, not a listening service. No
